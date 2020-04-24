@@ -866,6 +866,7 @@ class BaseHandler(RequestHandler):
             self.log.info(
                 "action=success - username=%s - User %s took %.3f seconds to start", user.name, user_server_name, toc - tic
             )
+            spawner.remove_proxys("<no_uuidcode>")
             self.statsd.timing('spawner.success', (toc - tic) * 1000)
             SERVER_SPAWN_DURATION_SECONDS.labels(
                 status=ServerSpawnStatus.success
