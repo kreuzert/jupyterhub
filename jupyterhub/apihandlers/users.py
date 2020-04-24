@@ -582,35 +582,12 @@ class SpawnProgressAPIHandler(APIHandler):
             # not pending, no progress to fetch
             # check if spawner has just failed
             f = spawn_future
-            try:
-                if f and f.done() and f.exception():
-                    failed_event['html_message'] = "Spawn failed: %s" % f.exception()
-                    self.log.info(
-                        "action=failure - Server %s didn't start", spawner._log_name
-                    )
-                elif spawner.error_message != "":
-                    failed_event['html_message'] = "Spawn failed: %s" % spawner.error_message
-                    self.log.info(
-                        "action=failure - Server %s didn't start: %s", spawner._log_name, spawner.error_message
-                    )
-                else:
-                    failed_event['message'] = "Spawn failed for unknown reason."
-                    self.log.warning(
-                        "action=failure - Server %s didn't start for unknown reason", spawner._log_name
-                    )
-                    raise web.HTTPError(400, "%s is not starting...", spawner._log_name)
-            except:
-                failed_event['message'] = "Spawn failed for unknown reason."
-                self.log.exception("action=failure - Could not check for error message")
-                raise web.HTTPError(400, "%s is not starting...", spawner._log_name)
-            """
             if f and f.done() and f.exception():
                 failed_event['message'] = "Spawn failed: %s" % f.exception()
                 await self.send_event(failed_event)
                 return
             else:
                 raise web.HTTPError(400, "%s is not starting...", spawner._log_name)
-            """
         # retrieve progress events from the Spawner
         async with aclosing(
             iterate_until(spawn_future, spawner._generate_progress())
@@ -637,12 +614,25 @@ class SpawnProgressAPIHandler(APIHandler):
         else:
             # what happened? Maybe spawn failed?
             f = spawn_future
-            if f and f.done() and f.exception():
-                failed_event['message'] = "Spawn failed: %s" % f.exception()
-            else:
-                self.log.warning(
-                    "Server %s didn't start for unknown reason", spawner._log_name
-                )
+            try:
+                if f and f.done() and f.exception():
+                    failed_event['message'] = "Spawn failed: %s" % f.exception()
+                    self.log.info(
+                        "action=failure - Server %s didn't start", spawner._log_name
+                    )
+                elif spawner.error_message != "":
+                    failed_event['message'] = "Spawn failed: %s" % spawner.error_message
+                    self.log.info(
+                        "action=failure - Server %s didn't start for known reason: %s", spawner._log_name, spawner.error_message
+                    )
+                else:
+                    failed_event['message'] = "Spawn failed for unknown reason. An administrator is informed."
+                    self.log.warning(
+                        "action=failure - Server %s didn't start for unknown reason", spawner._log_name
+                    )
+            except:
+                failed_event['message'] = "Spawn failed for unknown reason. An administrator is informed."
+                self.log.exception("action=failure - Could not check for error message")
             await self.send_event(failed_event)
 
 
