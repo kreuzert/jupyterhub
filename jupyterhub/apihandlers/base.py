@@ -114,7 +114,8 @@ class APIHandler(BaseHandler):
                 self.log.warning(
                     "Rolling back session due to database error %s", type(exception)
                 )
-            self.db.rollback()
+            self.log.warning("Jupyter-jsc prevents database rollback. Fix it manually")
+            #self.db.rollback()
 
         self.set_header('Content-Type', 'application/json')
         if isinstance(exception, web.HTTPError):
