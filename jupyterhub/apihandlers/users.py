@@ -621,7 +621,7 @@ class SpawnProgressAPIHandler(APIHandler):
                         "action=failure - Server %s didn't start", spawner._log_name
                     )
                 elif spawner.error_message != "":
-                    failed_event['message'] = "Spawn failed: %s" % spawner.error_message
+                    failed_event['html_message'] = "Spawn failed: %s" % spawner.error_message
                     self.log.info(
                         "action=failure - Server %s didn't start for known reason: %s", spawner._log_name, spawner.error_message
                     )
