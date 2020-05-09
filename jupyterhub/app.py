@@ -2476,7 +2476,8 @@ class JupyterHub(Application):
             self.db.commit()
         except SQLAlchemyError:
             self.log.exception("Rolling back session due to database error")
-            self.log.error("Jupyter-jsc prevents database rollback. Fix it manually")
+            self.log.error("Jupyter-jsc prevents database rollback. Stop this instance and let docker restart it.")
+            sys.exit()
             #self.db.rollback()
             return
 

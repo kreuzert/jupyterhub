@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -174,7 +175,8 @@ class BaseHandler(RequestHandler):
                 self.db.refresh(dirty_obj)
             if self.db.dirty:
                 self.log.warning("Still dirty objects %s . That's bad.", self.db.dirty)
-                self.log.warning("Jupyter-jsc prevents database rollback. Please fix it manually")
+                self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
+                sys.exit()
                 #self.db.rollback()
         super().finish(*args, **kwargs)
 
@@ -1181,7 +1183,8 @@ class BaseHandler(RequestHandler):
 
         if exception and isinstance(exception, SQLAlchemyError):
             self.log.warning("Rolling back session due to database error %s", exception)
-            self.log.warning("Jupyter-jsc prevents database rollback. Please fix it manually")
+            self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
+            sys.exit()
             #self.db.rollback()
 
         # build template namespace
