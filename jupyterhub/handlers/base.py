@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import os
 import sys
 import time
 import uuid
@@ -171,13 +172,16 @@ class BaseHandler(RequestHandler):
     def finish(self, *args, **kwargs):
         """Roll back any uncommitted transactions from the handler."""
         if self.db.dirty:
-            for dirty_obj in self.db.dirty:
-                self.db.refresh(dirty_obj)
-            if self.db.dirty:
-                self.log.warning("Still dirty objects %s . That's bad.", self.db.dirty)
-                self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
-                sys.exit()
-                #self.db.rollback()
+            if os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true':
+                for dirty_obj in self.db.dirty:
+                    self.db.refresh(dirty_obj)
+                if self.db.dirty:
+                    self.log.warning("Still dirty objects %s . That's bad.", self.db.dirty)
+                    self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
+                    sys.exit()
+            else:
+                self.log.warning("Rolling back dirty objects %s", self.db.dirty)
+                self.db.rollback()
         super().finish(*args, **kwargs)
 
     # ---------------------------------------------------------------
@@ -1182,10 +1186,12 @@ class BaseHandler(RequestHandler):
                 message = reasons.get(reason, reason)
 
         if exception and isinstance(exception, SQLAlchemyError):
-            self.log.warning("Rolling back session due to database error %s", exception)
-            self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
-            sys.exit()
-            #self.db.rollback()
+            if os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true':
+                self.log.warning("Jupyter-jsc prevents database rollback. Stop the instance and let docker restart it.")
+                sys.exit()
+            else:
+                self.log.warning("Rolling back session due to database error %s", exception)
+                self.db.rollback()
 
         # build template namespace
         ns = dict(

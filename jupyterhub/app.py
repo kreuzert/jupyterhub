@@ -2475,10 +2475,16 @@ class JupyterHub(Application):
         try:
             self.db.commit()
         except SQLAlchemyError:
-            self.log.exception("Rolling back session due to database error")
-            self.log.error("Jupyter-jsc prevents database rollback. Stop this instance and let docker restart it.")
-            sys.exit()
-            #self.db.rollback()
+            try:
+                if os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true'
+                    self.log.error("Jupyter-jsc prevents database rollback. Stop this instance and let docker restart it.")
+                    sys.exit()
+                else:
+                    self.log.exception("Rolling back session due to database error")
+                    self.db.rollback()
+            except:
+                self.log.exception("Rolling back session due to database error")
+                self.db.rollback()
             return
 
         await self.proxy.check_routes(self.users, self._service_map, routes)
