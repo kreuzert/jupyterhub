@@ -2476,7 +2476,7 @@ class JupyterHub(Application):
             self.db.commit()
         except SQLAlchemyError:
             try:
-                if os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true'
+                if os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true':
                     self.log.error("Jupyter-jsc prevents database rollback. Stop this instance and let docker restart it.")
                     sys.exit()
                 else:
