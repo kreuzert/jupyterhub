@@ -2,6 +2,7 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import json
+import sys
 from datetime import datetime
 from http.client import responses
 
@@ -114,7 +115,11 @@ class APIHandler(BaseHandler):
                 self.log.warning(
                     "Rolling back session due to database error %s", type(exception)
                 )
-            self.db.rollback()
+            if self.app.multiple_instances:
+                self.log.exception("Prevent rollback. Shutdown instance instead")
+                sys.exit(1)
+            else:
+                self.db.rollback()
 
         self.set_header('Content-Type', 'application/json')
         if isinstance(exception, web.HTTPError):
