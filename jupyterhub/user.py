@@ -8,6 +8,7 @@ from datetime import timedelta
 from urllib.parse import quote
 from urllib.parse import urlparse
 
+from concurrent.futures._base import CancelledError
 from sqlalchemy import inspect
 from tornado import gen
 from tornado import web
@@ -409,6 +410,24 @@ class User:
             url_parts.extend(['server/progress'])
         return url_path_join(*url_parts)
 
+    def cancel_url(self, server_name=''):
+        """API path for cancel endpoint for a server with a given name"""
+        url_parts = ['users', self.escaped_name]
+        if server_name:
+            url_parts.extend(['servers', server_name, 'cancel'])
+        else:
+            url_parts.extend(['server/cancel'])
+        return url_path_join(*url_parts)
+
+    def status_update_url(self, server_name=''):
+        """API path for status update endpoint for a server with a given name"""
+        url_parts = ['users', self.escaped_name]
+        if server_name:
+            url_parts.extend(['servers', server_name, 'status'])
+        else:
+            url_parts.extend(['server/status'])
+        return url_path_join(*url_parts)
+
     async def refresh_auth(self, handler):
         """Refresh authentication if needed
 
@@ -694,6 +713,16 @@ class User:
                 )
                 e.reason = 'timeout'
                 self.settings['statsd'].incr('spawner.failure.http_timeout')
+            elif isinstance(e, CancelledError):
+                e.reason = 'cancel'
+                self.log.info(
+                    "Start of service {server_name} was cancelled".format(
+                        server_name=spawner._log_name
+                    )
+                )
+                self.settings['statsd'].incr('spawner.failure.http_cancel')
+                await self.stop(spawner.name)
+                raise e
             else:
                 e.reason = 'error'
                 self.log.error(

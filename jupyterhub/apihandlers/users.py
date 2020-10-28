@@ -8,6 +8,7 @@ from datetime import timedelta
 from datetime import timezone
 
 from async_generator import aclosing
+from concurrent.futures._base import CancelledError
 from dateutil.parser import parse as parse_date
 from tornado import web
 from tornado.iostream import StreamClosedError
@@ -495,7 +496,6 @@ class UserAdminAccessAPIHandler(APIHandler):
         if user is None:
             raise web.HTTPError(404)
 
-
 class SpawnProgressAPIHandler(APIHandler):
     """EventStream handler for pending spawns"""
 
@@ -564,7 +564,7 @@ class SpawnProgressAPIHandler(APIHandler):
             'html_message': 'Server ready at <a href="{0}">{0}</a>'.format(url),
             'url': url,
         }
-        failed_event = {'progress': 100, 'failed': True, 'message': "Spawn failed"}
+        failed_event = {'progress': 100, 'failed': True, 'message': "Start failed"}
 
         if spawner.ready:
             # spawner already ready. Trigger progress-completion immediately
@@ -579,7 +579,7 @@ class SpawnProgressAPIHandler(APIHandler):
             # check if spawner has just failed
             f = spawn_future
             if f and f.done() and f.exception():
-                failed_event['message'] = "Spawn failed: %s" % f.exception()
+                failed_event['message'] = "Start failed: %s" % f.exception()
                 await self.send_event(failed_event)
                 return
             else:
@@ -610,15 +610,65 @@ class SpawnProgressAPIHandler(APIHandler):
             await self.send_event(ready_event)
         else:
             # what happened? Maybe spawn failed?
-            f = spawn_future
-            if f and f.done() and f.exception():
-                failed_event['message'] = "Spawn failed: %s" % f.exception()
-            else:
-                self.log.warning(
-                    "Server %s didn't start for unknown reason", spawner._log_name
-                )
+            try:
+                f = spawn_future
+                if f and f.done() and f.exception():
+                    failed_event['message'] = "Start failed: %s" % f.exception()
+                    self.log.info("action=failure - Server %s didn't start", spawner._log_name)
+                else:
+                    self.log.warning(
+                        "Server %s didn't start for unknown reason", spawner._log_name
+                    )
+            except CancelledError:
+                if spawner._error:
+                    if spawner._error == 'cancelclick':
+                        failed_event['html_message'] = "Start cancelled by user"
+                    else:
+                        failed_event['html_message'] = "Start failed: %s" % spawner._error
+                    self.log.info("action=failure - Server %s didn't start: %s", spawner._log_name, spawner._error)
+                else:
+                    failed_event['message'] = "Start failed. Please contact support."
+                    self.log.info("action=failure - Server %s didn't start", spawner._log_name)
             await self.send_event(failed_event)
 
+class SpawnCancelAPIHandler(APIHandler):
+    @admin_or_self
+    async def post(self, username, server_name=''):
+        self.set_header('Cache-Control', 'no-cache')
+        if server_name is None:
+            server_name = ''
+        user = self.find_user(username)
+        if user is None:
+            # no such user
+            raise web.HTTPError(404)
+        if server_name not in user.spawners:
+            # user has no such server
+            raise web.HTTPError(404)
+        spawner = user.spawners[server_name]
+        body = self.request.body.decode("utf8")
+        json_body = json.loads(body) if body else {}
+        error = json_body.get('error', '')
+        b = await spawner._cancel(error)
+        self.set_header('Content-Type', 'text/plain')
+        self.set_status(204)
+
+class SpawnProgressUpdateAPIHandler(SpawnProgressAPIHandler):
+    @admin_or_self
+    async def post(self, username, status, server_name=''):
+        self.set_header('Cache-Control', 'no-cache')
+        if server_name is None:
+            server_name = ''
+        user = self.find_user(username)
+        if user is None:
+            # no such user
+            raise web.HTTPError(404)
+        if server_name not in user.spawners:
+            # user has no such server
+            raise web.HTTPError(404)
+        spawner = user.spawners[server_name]
+        spawner.progress_number = int(status)
+        self.set_header('Content-Type', 'text/plain')
+        self.set_status(204)
 
 def _parse_timestamp(timestamp):
     """Parse and return a utc timestamp
@@ -750,10 +800,14 @@ default_handlers = [
     (r"/api/users/([^/]+)", UserAPIHandler),
     (r"/api/users/([^/]+)/server", UserServerAPIHandler),
     (r"/api/users/([^/]+)/server/progress", SpawnProgressAPIHandler),
+    (r"/api/users/([^/]+)/server/cancel", SpawnCancelAPIHandler),
+    (r"/api/users/([^/]+)/server/status/([^/]*)", SpawnProgressUpdateAPIHandler),
     (r"/api/users/([^/]+)/tokens", UserTokenListAPIHandler),
     (r"/api/users/([^/]+)/tokens/([^/]*)", UserTokenAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)", UserServerAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)/progress", SpawnProgressAPIHandler),
+    (r"/api/users/([^/]+)/servers/([^/]*)/cancel", SpawnCancelAPIHandler),
+    (r"/api/users/([^/]+)/servers/([^/]*)/status/([^/]+)", SpawnProgressUpdateAPIHandler),
     (r"/api/users/([^/]+)/activity", ActivityAPIHandler),
     (r"/api/users/([^/]+)/admin-access", UserAdminAccessAPIHandler),
 ]

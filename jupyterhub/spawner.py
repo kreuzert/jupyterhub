@@ -20,7 +20,9 @@ if os.name == 'nt':
     import psutil
 from async_generator import async_generator
 from async_generator import yield_
+from concurrent.futures._base import CancelledError
 from sqlalchemy import inspect
+from tornado import gen
 from tornado.ioloop import PeriodicCallback
 from traitlets import Any
 from traitlets import Bool
@@ -92,6 +94,7 @@ class Spawner(LoggingConfigurable):
     _waiting_for_response = False
     _jupyterhub_version = None
     _spawn_future = None
+    _error = ''
 
     @property
     def _log_name(self):
@@ -986,6 +989,14 @@ class Spawner(LoggingConfigurable):
     def _progress_url(self):
         return self.user.progress_url(self.name)
 
+    @property
+    def _cancel_url(self):
+        return self.user.cancel_url(self.name)
+
+    @property
+    def _status_update_url(self):
+        return self.user.status_update_url(self.name)
+
     @async_generator
     async def _generate_progress(self):
         """Private wrapper of progress generator
@@ -1043,6 +1054,43 @@ class Spawner(LoggingConfigurable):
         raise NotImplementedError(
             "Override in subclass. Must be a Tornado gen.coroutine."
         )
+
+    cancel_progress_refresh_rate = Integer(
+        1000,
+        config=True,
+        help="""
+        Refresh rate to check if the progress bar is greater than Spawner.cancel_progress_activation.
+        Value in ms. Default is one check each 1000ms.
+        """,
+    )
+
+    cancel_progress_activation = Integer(
+        50,
+        config=True,
+        help="""
+        Defines at which percentage user's should be allowed to cancel a spawn.
+        Default is 50.
+        """,
+    )
+
+    async def _cancel(self, error=''):
+        self.log.info("Cancel {}".format(self._spawn_future))
+        if type(self._spawn_future) is asyncio.Task:
+            if self._spawn_future._state in ['PENDING']:
+                self._error = error
+
+                try:
+                    self._spawn_future.cancel()
+                    await maybe_future(self._spawn_future)
+                except CancelledError:
+                    self.log.debug("Spawn of {} cancelled.".format(self._log_name))
+
+                # Cleanup
+                #self.clear_state()
+                #self.orm_spawner.state = self.get_state()
+                #self.db.commit()
+                return True
+        return False
 
     async def stop(self, now=False):
         """Stop the single-user server
@@ -1582,3 +1630,44 @@ class SimpleLocalProcessSpawner(LocalProcessSpawner):
     def move_certs(self, paths):
         """No-op for installing certs"""
         return paths
+
+class BackendSpawner(SimpleLocalProcessSpawner):
+    progress_status = List([], config=True)
+    progress_number = 0
+    progress_number_last = -1
+
+    def clear_state(self):
+        """Clear stored state about this spawner (pid)"""
+        super(BackendSpawner, self).clear_state()
+        self.progress_number = 0
+        self.progress_number_last = -1
+
+    @async_generator
+    async def progress(self):
+        if len(self.progress_status) == 0:
+            await yield_({
+                "progress": 50, "message": "Spawning server..."
+            })
+        while True:
+            if self.progress_number == -2:
+                await yield_({
+                    "progress": 100,
+                    "failed": True,
+                    "message": self._error,
+                    "html_message": self._error
+                })
+            elif self.progress_number > self.progress_number_last:
+                try:
+                    self.progress_number_last = self.progress_number
+                    await yield_(self.progress_status[self.progress_number])
+                except KeyError:
+                    await yield_({
+                        "progress": 50, "message": "Unknown status update, keep spawning server..."
+                    })
+            await gen.sleep(1)
+
+    def get_env(self):
+        env = super().get_env()
+        env['JUPYTERHUB_STATUS_URL'] = self._status_update_url
+        env['JUPYTERHUB_CANCEL_URL'] = self._cancel_url
+        return env

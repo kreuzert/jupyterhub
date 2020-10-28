@@ -14,6 +14,7 @@
           <span class="sr-only"><span id="sr-progress">0%</span> Complete</span>
         </div>
       </div>
+      <a id="cancel" role="button" class="btn btn-lg btn-danger" disabled>Cancel</a>
       <p id="progress-message"></p>
     </div>
   </div>
@@ -32,7 +33,7 @@
 {% block script %}
 {{ super() }}
 <script type="text/javascript">
-require(["jquery"], function ($) {
+require(["jquery", "home"], function ($) {
   $("#refresh").click(function () {
     window.location.reload();
   });
@@ -43,6 +44,22 @@ require(["jquery"], function ($) {
   var progressBar = $("#progress-bar");
   var srProgress = $("#sr-progress");
   var progressLog = $("#progress-log");
+
+  $( document ).ready(function() {
+    checkStatusEverySecond();
+  });
+
+  function checkStatusEverySecond(){
+    interv = setInterval(checkStatus, {{cancel_progress_refresh_rate}});
+    function checkStatus() {
+      var str = document.getElementById("sr-progress").innerHTML;
+      var i = parseInt(str.substring(0, str.length-1));
+      if ( i >= {{cancel_progress_activation}} ) {
+        $('#cancel').attr("disabled", false);
+        clearInterval(interv);
+      }
+    }
+  }
 
   evtSource.onmessage = function(e) {
     var evt = JSON.parse(e.data);

@@ -13,6 +13,7 @@ require(["jquery", "moment", "jhapi", "utils"], function(
   var prefix = window.jhdata.prefix;
   var user = window.jhdata.user;
   var api = new JHAPI(base_url);
+  var cancel_url = window.jhdata.cancel_url;
 
   // Named servers buttons
 
@@ -108,6 +109,13 @@ require(["jquery", "moment", "jhapi", "utils"], function(
       window.location.href = "./spawn/" + user;
     } else {
       window.location.href = "./spawn/" + user + "/" + serverName;
+    }
+  });
+
+  $("#cancel").click(function () {
+    if ( ! $("#cancel").is('[disabled=disabled]') ){
+      $("#cancel").attr("disabled", true);
+      api.cancel_server(cancel_url);
     }
   });
 

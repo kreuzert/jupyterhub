@@ -64,6 +64,13 @@ define(["jquery", "utils"], function($, utils) {
     this.api_request(utils.url_path_join("users", user, "server"), options);
   };
 
+  JHAPI.prototype.cancel_server = function(cancel_url, options) {
+    options = options || {};
+    options = update(options, { type: "POST" });
+    options.data = JSON.stringify({ error: "cancelclick" });
+    this.api_request(cancel_url, options);
+  };
+
   JHAPI.prototype.stop_named_server = function(user, server_name, options) {
     options = options || {};
     options = update(options, { type: "DELETE", dataType: null });
