@@ -410,24 +410,6 @@ class User:
             url_parts.extend(['server/progress'])
         return url_path_join(*url_parts)
 
-    def cancel_url(self, server_name=''):
-        """API path for cancel endpoint for a server with a given name"""
-        url_parts = ['users', self.escaped_name]
-        if server_name:
-            url_parts.extend(['servers', server_name, 'cancel'])
-        else:
-            url_parts.extend(['server/cancel'])
-        return url_path_join(*url_parts)
-
-    def status_update_url(self, server_name=''):
-        """API path for status update endpoint for a server with a given name"""
-        url_parts = ['users', self.escaped_name]
-        if server_name:
-            url_parts.extend(['servers', server_name, 'status'])
-        else:
-            url_parts.extend(['server/status'])
-        return url_path_join(*url_parts)
-
     async def refresh_auth(self, handler):
         """Refresh authentication if needed
 
