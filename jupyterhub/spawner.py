@@ -1050,39 +1050,6 @@ class Spawner(LoggingConfigurable):
             "Override in subclass. Must be a Tornado gen.coroutine."
         )
 
-    cancel_progress_refresh_rate = Integer(
-        1000,
-        config=True,
-        help="""
-        Refresh rate to check if the progress bar is greater than Spawner.cancel_progress_activation.
-        Value in ms. Default is one check each 1000ms.
-        """,
-    )
-
-    cancel_progress_activation = Integer(
-        50,
-        config=True,
-        help="""
-        Defines at which percentage user's should be allowed to cancel a spawn.
-        Default is 50.
-        """,
-    )
-
-    async def _cancel(self, error=''):
-        self.log.info("Cancel {}".format(self._spawn_future))
-        if type(self._spawn_future) is asyncio.Task:
-            if self._spawn_future._state in ['PENDING']:
-                self._error = error
-
-                try:
-                    self._spawn_future.cancel()
-                    await maybe_future(self._spawn_future)
-                except CancelledError:
-                    self.log.debug("Spawn of {} cancelled.".format(self._log_name))
-
-                return True
-        return False
-
     async def stop(self, now=False):
         """Stop the single-user server
 
@@ -1624,6 +1591,49 @@ class SimpleLocalProcessSpawner(LocalProcessSpawner):
 
 
 class BackendSpawner(Spawner):
+    """
+    A Spawner that uses `requests.get`, `requests.post` and `requests.delete`
+    to poll, start and stop single-user servers.
+
+    Requires a running backend service.
+
+    Requirements for the backend:
+      - GET to `url_path_join(self.backend_spawner_ip, str(self.backend_spawner_id))
+        has to return "None" or an Integer.
+      - POST should start the jupyterhub-singleuser service.
+        Response of POST will be saved in `self.backend_spawner_id`.
+      - DELETE has to stop the service.
+
+    Features:
+      - The backend is able to update the progressbar with the ${JUPYTERHUB_STATUS_URL}
+        path. Related configurations:
+        - progress_status
+      - The backend is able to cancel a spawn with the ${JUPYTERHUB_CANCEL_URL} path.
+      - User can stop the start by himself. Related configurations:
+        - cancel_progress_refresh_rate
+        - cancel_progress_activation
+
+    """
+
+    cancel_progress_refresh_rate = Integer(
+        1000,
+        config=True,
+        help="""
+        Refresh rate to check if the progress bar is greater than
+        BackendSpawner.cancel_progress_activation.
+        Value in ms.
+        """,
+    )
+
+    cancel_progress_activation = Integer(
+        50,
+        config=True,
+        help="""
+        Defines at which percentage user's should be allowed to cancel a spawn.
+        Default is 50.
+        """,
+    )
+
     progress_status = List(
         [],
         config=True,
@@ -1661,6 +1671,21 @@ class BackendSpawner(Spawner):
     progress_number_last = -1  # last showed progress from self.progress_status
 
     backend_spawner_id = 0  # similar to pid in LocalProcessSpawner.
+
+    async def _cancel(self, error=''):
+        self.log.info("Cancel {}".format(self._spawn_future))
+        if type(self._spawn_future) is asyncio.Task:
+            if self._spawn_future._state in ['PENDING']:
+                self._error = error
+
+                try:
+                    self._spawn_future.cancel()
+                    await maybe_future(self._spawn_future)
+                except CancelledError:
+                    self.log.debug("Spawn of {} cancelled.".format(self._log_name))
+
+                return True
+        return False
 
     @property
     def _cancel_url(self):
