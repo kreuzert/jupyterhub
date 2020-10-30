@@ -171,7 +171,7 @@ class BaseHandler(RequestHandler):
         """Roll back any uncommitted transactions from the handler."""
         if self.db.dirty:
             if self.app.multiple_instances:
-                self.log.exception("Prevent rollback. Shutdown instance instead")
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
                 sys.exit(1)
             else:
                 self.log.warning("Rolling back dirty objects %s", self.db.dirty)
@@ -1174,7 +1174,7 @@ class BaseHandler(RequestHandler):
         if exception and isinstance(exception, SQLAlchemyError):
             if self.app.multiple_instances:
                 self.log.error(
-                    "Prevent rollback. Shutdown instance instead %s", exception
+                    "Prevent rollback. Shutdown instance instead %s .", exception
                 )
                 sys.exit(1)
             else:

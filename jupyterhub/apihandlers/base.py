@@ -116,7 +116,7 @@ class APIHandler(BaseHandler):
                     "Rolling back session due to database error %s", type(exception)
                 )
             if self.app.multiple_instances:
-                self.log.exception("Prevent rollback. Shutdown instance instead")
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
                 sys.exit(1)
             else:
                 self.db.rollback()

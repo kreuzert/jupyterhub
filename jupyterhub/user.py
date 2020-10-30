@@ -10,6 +10,7 @@ from threading import Thread
 from urllib.parse import quote
 from urllib.parse import urlparse
 
+import nest_asyncio
 from sqlalchemy import inspect
 from tornado import gen
 from tornado import web
@@ -286,14 +287,11 @@ class User:
             self.spawners[name].start_polling()
 
         for name, server_id in to_stop_list:
-
-            def call_stop(spawner_name):
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.stop(spawner_name))
-
-            t = Thread(target=call_stop, args=(name,))
-            t.start()
-            t.join()
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            session_ids = loop.run_until_complete(asyncio.gather(*(self.stop(name),)))[
+                0
+            ]
 
         for name, server_id in both_active_list:
             db_server = (
@@ -303,7 +301,7 @@ class User:
                 db_server.base_url != self.spawners[name].server.base_url
                 or db_server.port != self.spawners[name].server.port
             ):
-                self.log.debug("Bind URL from server {} has changed".format(name))
+                self.log.debug("Bind URL from server {} has changed.".format(name))
                 old_server = (
                     self.db.query(orm.Server)
                     .filter(orm.Server.id == self.spawners[name].orm_spawner.server_id)

@@ -471,7 +471,7 @@ class Proxy(LoggingConfigurable):
                         if route['target'] != spawner.server.host:
                             if self.app.multiple_instances:
                                 # do not steal other routes.
-                                # Multiple instances only works with remote spawners
+                                # Multiple instances only works with BackendSpawners.
                                 continue
                             self.log.warning(
                                 "Updating route for %s (%s → %s)",

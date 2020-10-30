@@ -393,7 +393,7 @@ class JupyterHub(Application):
 
     multiple_instances = Bool(
         os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true',
-        help="""Do we expect concurrent runs of the hub talking to the same db? Turning this off gives a major performance boost""",
+        help="""Do we expect concurrent runs of the hub talking to the same db? Turning this off gives a major performance boost.""",
     ).tag(config=True)
 
     confirm_no_ssl = Bool(False, help="""DEPRECATED: does nothing""").tag(config=True)
@@ -2485,7 +2485,7 @@ class JupyterHub(Application):
             self.db.commit()
         except SQLAlchemyError:
             if self.multiple_instances:
-                self.log.exception("Prevent rollback. Shutdown instance instead")
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
                 sys.exit(1)
             else:
                 self.log.exception("Rolling back session due to database error")
