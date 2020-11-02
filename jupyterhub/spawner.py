@@ -13,14 +13,19 @@ import shutil
 import signal
 import sys
 import warnings
+from contextlib import closing
 from subprocess import Popen
 from tempfile import mkdtemp
+
+import requests
 
 if os.name == 'nt':
     import psutil
 from async_generator import async_generator
 from async_generator import yield_
+from concurrent.futures._base import CancelledError
 from sqlalchemy import inspect
+from tornado import gen
 from tornado.ioloop import PeriodicCallback
 from traitlets import Any
 from traitlets import Bool
@@ -92,6 +97,7 @@ class Spawner(LoggingConfigurable):
     _waiting_for_response = False
     _jupyterhub_version = None
     _spawn_future = None
+    _error = ''
 
     @property
     def _log_name(self):
@@ -1582,3 +1588,280 @@ class SimpleLocalProcessSpawner(LocalProcessSpawner):
     def move_certs(self, paths):
         """No-op for installing certs"""
         return paths
+
+
+class BackendSpawner(Spawner):
+    """
+    A Spawner that uses `requests.get`, `requests.post` and `requests.delete`
+    to poll, start and stop single-user servers.
+
+    Requires a running backend service.
+
+    Requirements for the backend:
+      - GET to `url_path_join(self.backend_spawner_ip, str(self.backend_spawner_id))
+        has to return "None" or an Integer.
+      - POST should start the jupyterhub-singleuser service.
+        Response of POST will be saved in `self.backend_spawner_id`.
+      - DELETE has to stop the service.
+
+    Features:
+      - The backend is able to update the progressbar with the ${JUPYTERHUB_STATUS_URL}
+        path. Related configurations:
+        - progress_status
+      - The backend is able to cancel a spawn with the ${JUPYTERHUB_CANCEL_URL} path.
+      - User can stop the start by himself. Related configurations:
+        - cancel_progress_refresh_rate
+        - cancel_progress_activation
+
+    """
+
+    cancel_progress_refresh_rate = Integer(
+        1000,
+        config=True,
+        help="""
+        Refresh rate to check if the progress bar is greater than
+        BackendSpawner.cancel_progress_activation.
+        Value in ms.
+        """,
+    )
+
+    cancel_progress_activation = Integer(
+        50,
+        config=True,
+        help="""
+        Defines at which percentage user's should be allowed to cancel a spawn.
+        Default is 50.
+        """,
+    )
+
+    progress_status = List(
+        [],
+        config=True,
+        help="""
+    List of possible progress status. External scripts will be able to send
+    POST requests to BackendSpawner._status_url_update_url. 
+    """,
+    )
+
+    request_port_url = Unicode(
+        default="http://127.0.0.1:8000/api/port",
+        config=True,
+        help="""
+        start() function will call this url with an GET to get an actual free port from
+        the backend
+        """,
+    )
+
+    backend_spawner_ip = Unicode(
+        "127.0.0.1",
+        config=True,
+        help="""
+        IP where JupyterHub should look for the jupyterhub-singleuser 
+        service. If the backend responses with 202 the value of
+        reponseHeader['Location'] will be used instead.""",
+    )
+
+    backend_url = Unicode(
+        "http://127.0.0.1:8000/api/script",
+        config=True,
+        help="""URL to send POST GET and DELETE requests to""",
+    )
+
+    progress_number = -1  # progress to show from self.progress_status
+    progress_number_last = -1  # last showed progress from self.progress_status
+
+    backend_spawner_id = 0  # similar to pid in LocalProcessSpawner.
+
+    async def _cancel(self, error=''):
+        self.log.info("Cancel {}".format(self._spawn_future))
+        if type(self._spawn_future) is asyncio.Task:
+            if self._spawn_future._state in ['PENDING']:
+                self._error = error
+
+                try:
+                    self._spawn_future.cancel()
+                    await maybe_future(self._spawn_future)
+                except CancelledError:
+                    self.log.debug("Spawn of {} cancelled.".format(self._log_name))
+
+                return True
+        return False
+
+    def cancel_url(self, server_name=''):
+        """API path for cancel endpoint for a server with a given name"""
+        url_parts = ['users', self.user.escaped_name]
+        if server_name:
+            url_parts.extend(['servers', server_name, 'cancel'])
+        else:
+            url_parts.extend(['server/cancel'])
+        return url_path_join(*url_parts)
+
+    def status_update_url(self, server_name=''):
+        """API path for status update endpoint for a server with a given name"""
+        url_parts = ['users', self.user.escaped_name]
+        if server_name:
+            url_parts.extend(['servers', server_name, 'status'])
+        else:
+            url_parts.extend(['server/status'])
+        return url_path_join(*url_parts)
+
+    @property
+    def _cancel_url(self):
+        return self.cancel_url(self.name)
+
+    @property
+    def _status_update_url(self):
+        return self.status_update_url(self.name)
+
+    def clear_state(self):
+        """Clear stored state about this spawner (pid)"""
+        super(BackendSpawner, self).clear_state()
+        self.progress_number = 0
+        self.progress_number_last = -1
+        self.backend_spawner_id = 0
+
+    def load_state(self, state):
+        """Restore state about spawned single-user server after a hub restart.
+        """
+        super(BackendSpawner, self).load_state(state)
+        if 'progress_number' in state:
+            self.progress_number = state['progress_number']
+        if 'progress_number_last' in state:
+            self.progress_number_last = state['progress_number_last']
+        if 'backend_spawner_id' in state:
+            self.backend_spawner_id = state['backend_spawner_id']
+
+    def get_state(self):
+        """Save state that is needed to restore this spawner instance after a hub restore.
+        """
+        state = super(BackendSpawner, self).get_state()
+        if self.progress_number:
+            state['progress_number'] = self.progress_number
+        if self.progress_number_last:
+            state['progress_number_last'] = self.progress_number_last
+        if self.backend_spawner_id:
+            state['backend_spawner_id'] = self.backend_spawner_id
+        return state
+
+    def get_env(self):
+        env = super().get_env()
+        env['JUPYTERHUB_STATUS_URL'] = self._status_update_url
+        env['JUPYTERHUB_CANCEL_URL'] = self._cancel_url
+        return env
+
+    @async_generator
+    async def progress(self):
+        if len(self.progress_status) == 0:
+            await yield_({"progress": 50, "message": "Spawning server..."})
+        while True:
+            if self.progress_number == -2:
+                await yield_(
+                    {
+                        "progress": 100,
+                        "failed": True,
+                        "message": self._error,
+                        "html_message": self._error,
+                    }
+                )
+            elif self.progress_number > self.progress_number_last:
+                try:
+                    self.progress_number_last = self.progress_number
+                    await yield_(self.progress_status[self.progress_number])
+                except KeyError:
+                    self.log.exception("Unknown status update. Keep spawning server.")
+                    await yield_({"progress": 50, "message": "Spawning server..."})
+            await gen.sleep(1)
+
+    async def poll(self):
+        """Poll the spawned process to see if it is still running.
+
+        If the process is still running, we return None. If it is not running,
+        we return the exit code of the process if we have access to it, or 0 otherwise.
+        """
+        if self.backend_spawner_id == 0:
+            return 0
+
+        url = url_path_join(self.backend_url, str(self.backend_spawner_id))
+        with closing(requests.get(url, headers={}, verify=False)) as r:
+            if r.status_code == 200:
+                if r.content.decode('utf-8').strip() == 'None':
+                    self.log.debug("Poll: {} is still running".format(self._log_name))
+                    return None
+                else:
+                    # It's not running anymore
+                    self.log.debug(
+                        "Poll: {} not running anymore".format(self._log_name)
+                    )
+                    self.clear_state()
+                    return int(r.content.decode('utf-8'))
+            else:
+                self.log.info(
+                    "Poll false return code: {} {}".format(
+                        r.status_code, r.content.decode('utf-8')
+                    )
+                )
+        return 0
+
+    async def start(self):
+        """Start the single-user server."""
+        if self.request_port_url:
+            try:
+                with closing(
+                    requests.get(self.request_port_url, headers={}, verify=False)
+                ) as r:
+                    if r.status_code == 200:
+                        self.port = int(r.content.decode("utf-8"))
+                    else:
+                        raise Exception(
+                            "Could not receive port: {} {} {}".format(
+                                r.status_code, r.text, r.headers
+                            )
+                        )
+            except:
+                self.log.exception("Could not request port")
+                self.port = 0
+        if self.port == 0:
+            self.port = random_port()
+
+        env = self.get_env()
+        popen_kwargs = dict(start_new_session=True)
+        env['port'] = self.port
+        popen_kwargs['env'] = env
+        popen_kwargs['args'] = self.get_args()
+        if self.user_options:
+            popen_kwargs['user_options'] = self.user_options
+
+        with closing(
+            requests.post(self.backend_url, headers={}, json=popen_kwargs, verify=False)
+        ) as r:
+            if r.status_code == 202:
+                self.backend_spawner_id = int(r.content.decode('utf-8'))
+            elif r.status_code == 204:
+                self.backend_spawner_id = int(r.content.decode('utf-8'))
+                self.backend_spawner_ip = r.headers['Location']
+            else:
+                self.backend_spawner_id = 0
+                raise Exception(
+                    "Backend Spawn failed: {} {} {}".format(
+                        r.status_code, r.text, r.headers
+                    )
+                )
+
+        return (self.backend_spawner_ip, self.port)
+
+    async def stop(self):
+        """
+        Stop the server process for the current user.
+        """
+        if self.backend_spawner_id == 0:
+            self.log.warning("Spawner ID unknown")
+            return
+
+        url = url_path_join(self.backend_url, str(self.backend_spawner_id))
+        with closing(requests.delete(url, headers={}, verify=False)) as r:
+            if r.status_code != 202 and r.status_code != 204:
+                self.log.warning(
+                    "Unexpected Delete status_code: {} {}".format(
+                        r.status_code, r.content
+                    )
+                )
