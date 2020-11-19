@@ -1834,9 +1834,11 @@ class BackendSpawner(Spawner):
 
         env = self.get_env()
         popen_kwargs = dict(start_new_session=True)
-        env['port'] = self.port
+        popen_kwargs['port'] = self.port
         popen_kwargs['env'] = env
         popen_kwargs['args'] = self.get_args()
+        auth_state = await self.user.get_auth_state()
+        popen_kwargs['auth_state'] = auth_state
         if self.user_options:
             popen_kwargs['user_options'] = self.user_options
 
@@ -1855,7 +1857,6 @@ class BackendSpawner(Spawner):
                         r.status_code, r.text, r.headers
                     )
                 )
-
         return (self.backend_spawner_ip, self.port)
 
     async def stop(self):
