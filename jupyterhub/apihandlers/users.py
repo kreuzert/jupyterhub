@@ -36,7 +36,10 @@ class SelfAPIHandler(APIHandler):
             user = self.get_current_user_oauth_token()
         if user is None:
             raise web.HTTPError(403)
-        self.write(json.dumps(self.user_model(user)))
+
+        model = self.user_model(user)
+        model['auth_state'] = await user.get_auth_state()
+        self.write(json.dumps(model))
 
 
 class UserListAPIHandler(APIHandler):
