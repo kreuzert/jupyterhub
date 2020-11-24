@@ -1686,13 +1686,11 @@ class BackendSpawner(Spawner):
         if type(self._spawn_future) is asyncio.Task:
             if self._spawn_future._state in ['PENDING']:
                 self._error = error
-
                 try:
                     self._spawn_future.cancel()
                     await maybe_future(self._spawn_future)
                 except CancelledError:
                     self.log.debug("Spawn of {} cancelled.".format(self._log_name))
-
                 return True
         return False
 
@@ -1790,8 +1788,12 @@ class BackendSpawner(Spawner):
         if self.backend_spawner_id == 0:
             return 0
 
-        url = url_path_join(self.backend_url, str(self.backend_spawner_id))
-        with closing(requests.get(url, headers={}, verify=False)) as r:
+        url = url_path_join(f"{self.backend_url}/", f"{self.backend_spawner_id}")
+        headers = {}
+        auth_state = await self.user.get_auth_state()
+        if auth_state:
+            headers['Authorization'] = 'Bearer {}'.format(auth_state.get('access_token', ''))
+        with closing(requests.get(url, headers=headers, verify=False)) as r:
             if r.status_code == 200:
                 if r.content.decode('utf-8').strip() == 'None':
                     self.log.debug("Poll: {} is still running".format(self._log_name))
@@ -1867,8 +1869,12 @@ class BackendSpawner(Spawner):
             self.log.warning("Spawner ID unknown")
             return
 
-        url = url_path_join(self.backend_url, str(self.backend_spawner_id))
-        with closing(requests.delete(url, headers={}, verify=False)) as r:
+        url = url_path_join(f"{self.backend_url}/", f"{self.backend_spawner_id}")
+        headers = {}
+        auth_state = await self.user.get_auth_state()
+        if auth_state:
+            headers['Authorization'] = 'Bearer {}'.format(auth_state.get('access_token', ''))
+        with closing(requests.delete(url, headers=headers, verify=False)) as r:
             if r.status_code != 202 and r.status_code != 204:
                 self.log.warning(
                     "Unexpected Delete status_code: {} {}".format(
