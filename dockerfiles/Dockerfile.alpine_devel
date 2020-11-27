@@ -1,5 +1,5 @@
 FROM python:3.8.6-alpine3.12
-  
+
 ARG JUPYTERHUB_VERSION=1.1.0
 
 RUN adduser --uid 1099 --disabled-password --gecos '' jupyterhub
@@ -8,9 +8,8 @@ RUN mkdir -p /srv/jupyterhub
 
 # Needed for pycurl
 ENV PYCURL_SSL_LIBRARY=openssl
-# RUN apk update && apk add libcurl
 
-COPY ./jupyterhub /srv/jupyterhub
+COPY ./requirements.txt /requirements.txt
 
 RUN apk update && \
     apk add --no-cache --virtual .build-dependencies \
@@ -26,8 +25,11 @@ RUN apk update && \
                        openssl-dev \
                        postgresql-dev \
                        python3-dev && \
-                       cd /srv/jupyterhub && pip3 install --upgrade setuptools pip && pip3 install cryptography --no-binary=cryptography && pip3 install -e . && \
+                       cd /srv/jupyterhub && pip3 install --upgrade setuptools pip && pip3 install cryptography --no-binary=cryptography && pip3 install -r ./requirements.txt && \
     apk del .build-dependencies 
+
+COPY ./jupyterhub /srv/jupyterhub
+RUN cd /srv/jupyterhub && pip3 install -e .
 
 ENV LANG=en_US.UTF-8
 
