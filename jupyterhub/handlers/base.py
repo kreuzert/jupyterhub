@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import math
+import os
 import random
 import re
 import sys
@@ -19,6 +20,7 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
+import nest_asyncio
 from jinja2 import TemplateNotFound
 from sqlalchemy.exc import SQLAlchemyError
 from tornado import gen
@@ -333,7 +335,7 @@ class BaseHandler(RequestHandler):
         self._refreshed_users.add(user.name)
 
         self.log.debug("Refreshing auth for %s", user.name)
-        auth_info = await self.authenticator.refresh_user(user, self)
+        auth_info = await self.authenticator.refresh_user(user, self, force)
 
         if not auth_info:
             self.log.warning(
@@ -405,6 +407,15 @@ class BaseHandler(RequestHandler):
             # have cookie, but it's not valid. Clear it and start over.
             clear()
             return
+        if self.authenticator.enable_auth_state and self.app.strict_session_ids:
+            session_id = self.get_cookie(SESSION_COOKIE_NAME, '')
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            session_ids = loop.run_until_complete(
+                asyncio.gather(*(self.app.load_session_ids(user.name),))
+            )[0]
+            if session_id not in session_ids:
+                return None
         # update user activity
         if self._record_activity(user):
             self.db.commit()
@@ -580,11 +591,15 @@ class BaseHandler(RequestHandler):
             self.set_service_cookie(user)
 
         if not self.get_session_cookie():
-            self.set_session_cookie()
+            session_id = self.set_session_cookie()
+        else:
+            session_id = self.get_session_cookie()
 
         # create and set a new cookie token for the hub
         if not self.get_current_user_cookie():
             self.set_hub_cookie(user)
+
+        return session_id
 
     def authenticate(self, data):
         return maybe_future(self.authenticator.get_authenticated_user(self, data))
@@ -695,6 +710,18 @@ class BaseHandler(RequestHandler):
         if not self.authenticator.enable_auth_state:
             # auth_state is not enabled. Force None.
             auth_state = None
+        elif self.app.strict_session_ids:
+            # auth_state is enable and strict_session_ids are required
+            # ensure that session_ids added previously are not deleted
+            prev_auth_state = await user.get_auth_state()
+            if prev_auth_state:
+                session_ids = prev_auth_state.get('session_ids', [])
+            else:
+                session_ids = []
+            if auth_state:
+                auth_state['session_ids'] = session_ids
+            else:
+                auth_state = {'session_ids': session_ids}
         await user.save_auth_state(auth_state)
         return user
 
@@ -706,11 +733,20 @@ class BaseHandler(RequestHandler):
 
         if authenticated:
             user = await self.auth_to_user(authenticated)
-            self.set_login_cookie(user)
+            session_id = self.set_login_cookie(user)
             self.statsd.incr('login.success')
             self.statsd.timing('login.authenticate.success', auth_timer.ms)
             self.log.info("User logged in: %s", user.name)
             user._auth_refreshed = time.monotonic()
+            if self.authenticator.enable_auth_state and self.app.strict_session_ids:
+                # append session_id to user's auth_state
+                auth_state = await user.get_auth_state()
+                if auth_state:
+                    if 'session_ids' not in auth_state:
+                        auth_state['session_ids'] = []
+                    auth_state['session_ids'].append(session_id)
+                    # self.log.debug("{} - Session_ids: {}".format(user.name, auth_state['session_ids']))
+                    await user.save_auth_state(auth_state)
             return user
         else:
             self.statsd.incr('login.failure')
@@ -725,7 +761,7 @@ class BaseHandler(RequestHandler):
 
     @property
     def slow_spawn_timeout(self):
-        return self.settings.get('slow_spawn_timeout', 10)
+        return self.settings.get('slow_spawn_timeout', 0)
 
     @property
     def slow_stop_timeout(self):
@@ -1115,7 +1151,9 @@ class BaseHandler(RequestHandler):
 
     def get_template(self, name):
         """Return the jinja template object for a given name"""
-        return self.settings['jinja2_env'].get_template(name)
+        host_template = os.path.join(self.request.host, name)
+        ret = self.settings['jinja2_env'].get_template(host_template)
+        return ret
 
     def render_template(self, name, **ns):
         template_ns = {}
@@ -1417,10 +1455,14 @@ class UserUrlHandler(BaseHandler):
 
         # if request is expecting JSON, assume it's an API request and fail with 503
         # because it won't like the redirect to the pending page
-        if get_accepted_mimetype(
-            self.request.headers.get('Accept', ''),
-            choices=['application/json', 'text/html'],
-        ) == 'application/json' or 'api' in user_path.split('/'):
+        if (
+            get_accepted_mimetype(
+                self.request.headers.get('Accept', ''),
+                choices=['application/json', 'text/html'],
+            )
+            == 'application/json'
+            or 'api' in user_path.split('/')
+        ):
             self._fail_api_request(user_name, server_name)
             return
 
