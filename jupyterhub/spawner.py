@@ -12,6 +12,7 @@ import pipes
 import shutil
 import signal
 import sys
+import uuid
 import warnings
 from contextlib import closing
 from subprocess import Popen
@@ -23,7 +24,6 @@ if os.name == 'nt':
     import psutil
 from async_generator import async_generator
 from async_generator import yield_
-from concurrent.futures._base import CancelledError
 from sqlalchemy import inspect
 from tornado import gen
 from tornado.ioloop import PeriodicCallback
@@ -98,6 +98,7 @@ class Spawner(LoggingConfigurable):
     _jupyterhub_version = None
     _spawn_future = None
     _error = ''
+    _detail_error = ''
 
     @property
     def _log_name(self):
@@ -1671,20 +1672,29 @@ class BackendSpawner(Spawner):
         help="""URL to send POST GET and DELETE requests to""",
     )
 
+    backend_header_host = Unicode(
+        os.environ.get("BACKEND_HEADER_HOST"),
+        config=True,
+        help="""Some backends require a correct Host value in the request header""",
+    )
+
     progress_number = -1  # progress to show from self.progress_status
     progress_number_last = -1  # last showed progress from self.progress_status
 
     backend_spawner_id = 0  # similar to pid in LocalProcessSpawner.
+    start_uuid = 0  # Hash to identify specific spawn processes.
 
-    async def _cancel(self, error=''):
-        self.log.info("Cancel {}".format(self._spawn_future))
+    async def _cancel(self, error='', detail_error=''):
+        self.log.info("Cancel {}".format(self._log_name))
         if type(self._spawn_future) is asyncio.Task:
             if self._spawn_future._state in ['PENDING']:
                 self._error = error
+                self._detail_error = detail_error
                 try:
+                    await self.user.stop(self.name)
                     self._spawn_future.cancel()
                     await maybe_future(self._spawn_future)
-                except CancelledError:
+                except asyncio.CancelledError:
                     self.log.debug("Spawn of {} cancelled.".format(self._log_name))
                 return True
         return False
@@ -1721,10 +1731,10 @@ class BackendSpawner(Spawner):
         self.progress_number = 0
         self.progress_number_last = -1
         self.backend_spawner_id = 0
+        self.start_uuid = 0
 
     def load_state(self, state):
-        """Restore state about spawned single-user server after a hub restart.
-        """
+        """Restore state about spawned single-user server after a hub restart."""
         super(BackendSpawner, self).load_state(state)
         if 'progress_number' in state:
             self.progress_number = state['progress_number']
@@ -1732,10 +1742,11 @@ class BackendSpawner(Spawner):
             self.progress_number_last = state['progress_number_last']
         if 'backend_spawner_id' in state:
             self.backend_spawner_id = state['backend_spawner_id']
+        if 'start_uuid' in state:
+            self.start_uuid = state['start_uuid']
 
     def get_state(self):
-        """Save state that is needed to restore this spawner instance after a hub restore.
-        """
+        """Save state that is needed to restore this spawner instance after a hub restore."""
         state = super(BackendSpawner, self).get_state()
         if self.progress_number:
             state['progress_number'] = self.progress_number
@@ -1743,6 +1754,8 @@ class BackendSpawner(Spawner):
             state['progress_number_last'] = self.progress_number_last
         if self.backend_spawner_id:
             state['backend_spawner_id'] = self.backend_spawner_id
+        if self.start_uuid:
+            state['start_uuid'] = self.start_uuid
         return state
 
     def get_env(self):
@@ -1768,7 +1781,18 @@ class BackendSpawner(Spawner):
             elif self.progress_number > self.progress_number_last:
                 try:
                     self.progress_number_last = self.progress_number
-                    await yield_(self.progress_status[self.progress_number])
+                    progress = self.progress_status[self.progress_number]
+                    self.log.debug("Progress: {}".format(progress))
+                    if 'uo_limitation' in progress.keys():
+                        self.log.debug(
+                            "Progress: {}".format(progress.get('uo_limitation'))
+                        )
+                        for key, value in progress['uo_limitation'].items():
+                            if self.user_options[key] in value:
+                                await yield_(progress[self.user_options[key]])
+                                break
+                    else:
+                        await yield_(progress)
                 except KeyError:
                     self.log.exception("Unknown status update. Keep spawning server.")
                     await yield_({"progress": 50, "message": "Spawning server..."})
@@ -1782,11 +1806,24 @@ class BackendSpawner(Spawner):
         if self.backend_spawner_id == 0:
             return 0
 
-        url = url_path_join(f"{self.backend_url}/", f"{self.backend_spawner_id}")
-        headers = {}
+        uuidcode = uuid.uuid4().hex
+
+        url = url_path_join(
+            "{}/".format(self.backend_url), str(self.backend_spawner_id)
+        )
+
+        headers = {"Host": self.backend_header_host, "uuidcode": uuidcode}
+
+        self.log.info(
+            "uuidcode={uuidcode} action=poll server={logname}".format(
+                uuidcode=uuidcode, logname=self._log_name
+            )
+        )
         auth_state = await self.user.get_auth_state()
         if auth_state:
-            headers['Authorization'] = 'Bearer {}'.format(auth_state.get('access_token', ''))
+            headers['Authorization'] = 'Bearer {}'.format(
+                auth_state.get('access_token', '')
+            )
         with closing(requests.get(url, headers=headers, verify=False)) as r:
             if r.status_code == 200:
                 if r.content.decode('utf-8').strip() == 'None':
@@ -1801,18 +1838,25 @@ class BackendSpawner(Spawner):
                     return int(r.content.decode('utf-8'))
             else:
                 self.log.info(
-                    "Poll false return code: {} {}".format(
-                        r.status_code, r.content.decode('utf-8')
+                    "Poll false return code: {} {} {}".format(
+                        url, r.status_code, r.content.decode('utf-8')
                     )
                 )
         return 0
 
     async def start(self):
         """Start the single-user server."""
+        self.start_uuid = uuid.uuid4().hex
+        self.log.info(
+            "uuidcode={uuidcode} action=start server={logname}".format(
+                uuidcode=self.start_uuid, logname=self._log_name
+            )
+        )
+        header = {"Host": self.backend_header_host, "uuidcode": self.start_uuid}
         if self.request_port_url:
             try:
                 with closing(
-                    requests.get(self.request_port_url, headers={}, verify=False)
+                    requests.get(self.request_port_url, headers=header, verify=False)
                 ) as r:
                     if r.status_code == 200:
                         self.port = int(r.content.decode("utf-8"))
@@ -1839,7 +1883,9 @@ class BackendSpawner(Spawner):
             popen_kwargs['user_options'] = self.user_options
 
         with closing(
-            requests.post(self.backend_url, headers={}, json=popen_kwargs, verify=False)
+            requests.post(
+                self.backend_url, headers=header, json=popen_kwargs, verify=False
+            )
         ) as r:
             if r.status_code == 202:
                 self.backend_spawner_id = int(r.content.decode('utf-8'))
@@ -1863,11 +1909,22 @@ class BackendSpawner(Spawner):
             self.log.warning("Spawner ID unknown")
             return
 
-        url = url_path_join(f"{self.backend_url}/", f"{self.backend_spawner_id}")
-        headers = {}
+        url = url_path_join(
+            "{}/".format(self.backend_url), str(self.backend_spawner_id)
+        )
+        uuidcode = uuid.uuid4().hex
+        headers = {"Host": self.backend_header_host, "uuidcode": uuidcode}
+
+        self.log.info(
+            "uuidcode={uuidcode} action=stop server={logname}".format(
+                uuidcode=uuidcode, logname=self._log_name
+            )
+        )
         auth_state = await self.user.get_auth_state()
         if auth_state:
-            headers['Authorization'] = 'Bearer {}'.format(auth_state.get('access_token', ''))
+            headers['Authorization'] = 'Bearer {}'.format(
+                auth_state.get('access_token', '')
+            )
         with closing(requests.delete(url, headers=headers, verify=False)) as r:
             if r.status_code != 202 and r.status_code != 204:
                 self.log.warning(

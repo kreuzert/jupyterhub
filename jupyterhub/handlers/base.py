@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import math
+import os
 import random
 import re
 import time
@@ -329,7 +330,7 @@ class BaseHandler(RequestHandler):
         self._refreshed_users.add(user.name)
 
         self.log.debug("Refreshing auth for %s", user.name)
-        auth_info = await self.authenticator.refresh_user(user, self)
+        auth_info = await self.authenticator.refresh_user(user, self, force)
 
         if not auth_info:
             self.log.warning(
@@ -755,7 +756,7 @@ class BaseHandler(RequestHandler):
 
     @property
     def slow_spawn_timeout(self):
-        return self.settings.get('slow_spawn_timeout', 10)
+        return self.settings.get('slow_spawn_timeout', 0)
 
     @property
     def slow_stop_timeout(self):
@@ -1145,7 +1146,9 @@ class BaseHandler(RequestHandler):
 
     def get_template(self, name):
         """Return the jinja template object for a given name"""
-        return self.settings['jinja2_env'].get_template(name)
+        host_template = os.path.join(self.request.host, name)
+        ret = self.settings['jinja2_env'].get_template(host_template)
+        return ret
 
     def render_template(self, name, **ns):
         template_ns = {}
@@ -1439,10 +1442,14 @@ class UserUrlHandler(BaseHandler):
 
         # if request is expecting JSON, assume it's an API request and fail with 503
         # because it won't like the redirect to the pending page
-        if get_accepted_mimetype(
-            self.request.headers.get('Accept', ''),
-            choices=['application/json', 'text/html'],
-        ) == 'application/json' or 'api' in user_path.split('/'):
+        if (
+            get_accepted_mimetype(
+                self.request.headers.get('Accept', ''),
+                choices=['application/json', 'text/html'],
+            )
+            == 'application/json'
+            or 'api' in user_path.split('/')
+        ):
             self._fail_api_request(user_name, server_name)
             return
 

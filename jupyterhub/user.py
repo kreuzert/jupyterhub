@@ -1,9 +1,9 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+import asyncio
 import json
 import warnings
 from collections import defaultdict
-from concurrent.futures._base import CancelledError
 from datetime import datetime
 from datetime import timedelta
 from urllib.parse import quote
@@ -665,6 +665,7 @@ class User:
             self.state = {}
         spawner.orm_spawner.state = spawner.get_state()
         db.commit()
+        self.log.warning("Set waiting for response to True")
         spawner._waiting_for_response = True
         await self._wait_up(spawner)
 
@@ -695,7 +696,7 @@ class User:
                 )
                 e.reason = 'timeout'
                 self.settings['statsd'].incr('spawner.failure.http_timeout')
-            elif isinstance(e, CancelledError):
+            elif isinstance(e, asyncio.CancelledError):
                 e.reason = 'cancel'
                 self.log.info(
                     "Start of service {server_name} was cancelled".format(
@@ -703,8 +704,6 @@ class User:
                     )
                 )
                 self.settings['statsd'].incr('spawner.failure.http_cancel')
-                await self.stop(spawner.name)
-                raise e
             else:
                 e.reason = 'error'
                 self.log.error(
@@ -731,6 +730,7 @@ class User:
             # if it doesn't work
             spawner._jupyterhub_version = server_version
         finally:
+            self.log.warning("Set waiting for response to False")
             spawner._waiting_for_response = False
             spawner._start_pending = False
         return spawner
