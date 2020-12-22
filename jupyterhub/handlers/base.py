@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -171,8 +172,12 @@ class BaseHandler(RequestHandler):
     def finish(self, *args, **kwargs):
         """Roll back any uncommitted transactions from the handler."""
         if self.db.dirty:
-            self.log.warning("Rolling back dirty objects %s", self.db.dirty)
-            self.db.rollback()
+            if self.app.multiple_instances:
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
+                sys.exit(1)
+            else:
+                self.log.warning("Rolling back dirty objects %s", self.db.dirty)
+                self.db.rollback()
         super().finish(*args, **kwargs)
 
     # ---------------------------------------------------------------
@@ -1205,8 +1210,16 @@ class BaseHandler(RequestHandler):
                 message = reasons.get(reason, reason)
 
         if exception and isinstance(exception, SQLAlchemyError):
-            self.log.warning("Rolling back session due to database error %s", exception)
-            self.db.rollback()
+            if self.app.multiple_instances:
+                self.log.error(
+                    "Prevent rollback. Shutdown instance instead %s .", exception
+                )
+                sys.exit(1)
+            else:
+                self.log.warning(
+                    "Rolling back session due to database error %s", exception
+                )
+                self.db.rollback()
 
         # build template namespace
         ns = dict(
