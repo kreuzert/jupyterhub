@@ -102,7 +102,7 @@ from .metrics import TOTAL_USERS
 
 # classes for config
 from .auth import Authenticator, PAMAuthenticator
-from .crypto import CryptKeeper
+from .crypto import CryptKeeper, decrypt
 from .spawner import Spawner, LocalProcessSpawner
 from .objects import Hub, Server
 
@@ -400,6 +400,11 @@ class JupyterHub(Application):
     template_vars = Dict(help="Extra variables to be passed into jinja templates").tag(
         config=True
     )
+
+    multiple_instances = Bool(
+        os.environ.get('MULTIPLE_INSTANCES', 'false').lower() == 'true',
+        help="""Do we expect concurrent runs of the hub talking to the same db? Turning this off gives a major performance boost.""",
+    ).tag(config=True)
 
     confirm_no_ssl = Bool(False, help="""DEPRECATED: does nothing""").tag(config=True)
     ssl_key = Unicode(
@@ -1006,6 +1011,49 @@ class JupyterHub(Application):
         else:
             return ""
 
+    logout_on_all_devices_argname = Unicode(
+        "onalldevices",
+        config=True,
+        help="""Default argument name for logout on all devices.
+        User can logout on all devices with a GET request to
+        /hub/logout?<logout_on_all_devices_argname>=true
+        Use c.JupyterHub.logout_on_all_devices to define a default
+        value for logout on all devices.
+        """,
+    )
+
+    logout_on_all_devices = Bool(
+        False,
+        config=True,
+        help="""Default value for logout on all devices.
+        This will create a new api_token for a user when he logs out.
+        Therefore all previous generated cookies, based on cookie_id,
+        are invalid.
+        """,
+    )
+
+    strict_session_ids = Bool(
+        False,
+        config=True,
+        help="""Saves session_ids in user's auth_state.
+        If the user logs out all stored session_ids will be removed.
+        Start services with JUPYTERHUB_REQUIRE_SESSION_ID="true", to
+        prevent logged out browsers to access these services.
+        """,
+    )
+
+    async def load_session_ids(self, username):
+        db_user = orm.User.find(self.db, username)
+        if db_user:
+            self.db.refresh(db_user)
+            encrypted = db_user.encrypted_auth_state
+            if encrypted is None:
+                return []
+            auth_state = await decrypt(encrypted)
+            if 'session_ids' in auth_state:
+                return auth_state['session_ids']
+        return []
+
     # class for spawning single-user servers
     spawner_class = EntryPointType(
         default_value=LocalProcessSpawner,
@@ -1590,7 +1638,11 @@ class JupyterHub(Application):
 
         try:
             self.session_factory = orm.new_session_factory(
-                self.db_url, reset=self.reset_db, echo=self.debug_db, **self.db_kwargs
+                self.db_url,
+                reset=self.reset_db,
+                expire_on_commit=self.multiple_instances,
+                echo=self.debug_db,
+                **self.db_kwargs,
             )
             self.db = self.session_factory()
         except OperationalError as e:
@@ -2000,7 +2052,7 @@ class JupyterHub(Application):
                     service.url,
                 )
 
-    async def init_spawners(self):
+    async def init_spawners(self, for_user=None, for_spawner=None):
         self.log.debug("Initializing spawners")
         db = self.db
 
@@ -2113,6 +2165,10 @@ class JupyterHub(Application):
             # instantiate Spawner wrapper and check if it's still alive
             # spawner should be running
             user = self.users[orm_spawner.user]
+            if for_user and user.name not in for_user:
+                continue
+            if for_spawner and orm_spawner.name not in for_spawner:
+                continue
             spawner = user.spawners[orm_spawner.name]
             self.log.debug("Loading state for %s from db", spawner._log_name)
             # signal that check is pending to avoid race conditions
@@ -2579,8 +2635,12 @@ class JupyterHub(Application):
         try:
             self.db.commit()
         except SQLAlchemyError:
-            self.log.exception("Rolling back session due to database error")
-            self.db.rollback()
+            if self.multiple_instances:
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
+                sys.exit(1)
+            else:
+                self.log.exception("Rolling back session due to database error")
+                self.db.rollback()
             return
 
         await self.proxy.check_routes(self.users, self._service_map, routes)

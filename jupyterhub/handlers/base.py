@@ -4,8 +4,10 @@
 import asyncio
 import json
 import math
+import os
 import random
 import re
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -17,6 +19,7 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
+import nest_asyncio
 from jinja2 import TemplateNotFound
 from sqlalchemy.exc import SQLAlchemyError
 from tornado import gen
@@ -167,8 +170,12 @@ class BaseHandler(RequestHandler):
     def finish(self, *args, **kwargs):
         """Roll back any uncommitted transactions from the handler."""
         if self.db.dirty:
-            self.log.warning("Rolling back dirty objects %s", self.db.dirty)
-            self.db.rollback()
+            if self.app.multiple_instances:
+                self.log.exception("Prevent rollback. Shutdown instance instead.")
+                sys.exit(1)
+            else:
+                self.log.warning("Rolling back dirty objects %s", self.db.dirty)
+                self.db.rollback()
         super().finish(*args, **kwargs)
 
     # ---------------------------------------------------------------
@@ -326,7 +333,7 @@ class BaseHandler(RequestHandler):
         self._refreshed_users.add(user.name)
 
         self.log.debug("Refreshing auth for %s", user.name)
-        auth_info = await self.authenticator.refresh_user(user, self)
+        auth_info = await self.authenticator.refresh_user(user, self, force)
 
         if not auth_info:
             self.log.warning(
@@ -398,6 +405,15 @@ class BaseHandler(RequestHandler):
             # have cookie, but it's not valid. Clear it and start over.
             clear()
             return
+        if self.authenticator.enable_auth_state and self.app.strict_session_ids:
+            session_id = self.get_cookie(SESSION_COOKIE_NAME, '')
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            session_ids = loop.run_until_complete(
+                asyncio.gather(*(self.app.load_session_ids(user.name),))
+            )[0]
+            if session_id not in session_ids:
+                return None
         # update user activity
         if self._record_activity(user):
             self.db.commit()
@@ -574,11 +590,15 @@ class BaseHandler(RequestHandler):
             self.set_service_cookie(user)
 
         if not self.get_session_cookie():
-            self.set_session_cookie()
+            session_id = self.set_session_cookie()
+        else:
+            session_id = self.get_session_cookie()
 
         # create and set a new cookie token for the hub
         if not self.get_current_user_cookie():
             self.set_hub_cookie(user)
+
+        return session_id
 
     def authenticate(self, data):
         return maybe_future(self.authenticator.get_authenticated_user(self, data))
@@ -740,6 +760,18 @@ class BaseHandler(RequestHandler):
         if not self.authenticator.enable_auth_state:
             # auth_state is not enabled. Force None.
             auth_state = None
+        elif self.app.strict_session_ids:
+            # auth_state is enable and strict_session_ids are required
+            # ensure that session_ids added previously are not deleted
+            prev_auth_state = await user.get_auth_state()
+            if prev_auth_state:
+                session_ids = prev_auth_state.get('session_ids', [])
+            else:
+                session_ids = []
+            if auth_state:
+                auth_state['session_ids'] = session_ids
+            else:
+                auth_state = {'session_ids': session_ids}
         await user.save_auth_state(auth_state)
         return user
 
@@ -751,11 +783,19 @@ class BaseHandler(RequestHandler):
 
         if authenticated:
             user = await self.auth_to_user(authenticated)
-            self.set_login_cookie(user)
+            session_id = self.set_login_cookie(user)
             self.statsd.incr('login.success')
             self.statsd.timing('login.authenticate.success', auth_timer.ms)
             self.log.info("User logged in: %s", user.name)
             user._auth_refreshed = time.monotonic()
+            if self.authenticator.enable_auth_state and self.app.strict_session_ids:
+                # append session_id to user's auth_state
+                auth_state = await user.get_auth_state()
+                if auth_state:
+                    if 'session_ids' not in auth_state:
+                        auth_state['session_ids'] = []
+                    auth_state['session_ids'].append(session_id)
+                    await user.save_auth_state(auth_state)
             return user
         else:
             self.statsd.incr('login.failure')
@@ -1180,7 +1220,9 @@ class BaseHandler(RequestHandler):
             key = 'jinja2_env_sync'
         else:
             key = 'jinja2_env'
-        return self.settings[key].get_template(name)
+        host_template = os.path.join(self.request.host, name)
+        ret = self.settings[key].get_template(host_template)
+        return ret
 
     def render_template(self, name, sync=False, **ns):
         """
@@ -1248,8 +1290,16 @@ class BaseHandler(RequestHandler):
                 message = reasons.get(reason, reason)
 
         if exception and isinstance(exception, SQLAlchemyError):
-            self.log.warning("Rolling back session due to database error %s", exception)
-            self.db.rollback()
+            if self.app.multiple_instances:
+                self.log.error(
+                    "Prevent rollback. Shutdown instance instead %s .", exception
+                )
+                sys.exit(1)
+            else:
+                self.log.warning(
+                    "Rolling back session due to database error %s", exception
+                )
+                self.db.rollback()
 
         # build template namespace
         ns = dict(

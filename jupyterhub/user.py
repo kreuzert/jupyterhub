@@ -1,5 +1,6 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+import asyncio
 import json
 import warnings
 from collections import defaultdict
@@ -8,6 +9,7 @@ from datetime import timedelta
 from urllib.parse import quote
 from urllib.parse import urlparse
 
+import nest_asyncio
 from sqlalchemy import inspect
 from tornado import gen
 from tornado import web
@@ -56,6 +58,8 @@ class UserDict(dict):
     def __init__(self, db_factory, settings):
         self.db_factory = db_factory
         self.settings = settings
+        app = self.settings.get('app', None)
+        self.multiple_instances = app.multiple_instances if app else False
         super().__init__()
 
     @property
@@ -107,10 +111,9 @@ class UserDict(dict):
             orm_user = key
             if orm_user.id not in self:
                 user = self[orm_user.id] = User(orm_user, self.settings)
-                return user
-            user = dict.__getitem__(self, orm_user.id)
-            user.db = self.db
-            return user
+            else:
+                user = dict.__getitem__(self, orm_user.id)
+                user.db = self.db
         elif isinstance(key, int):
             id = key
             if id not in self:
@@ -120,9 +123,11 @@ class UserDict(dict):
                 user = self.add(orm_user)
             else:
                 user = dict.__getitem__(self, id)
-            return user
         else:
             raise KeyError(repr(key))
+        if self.multiple_instances:
+            user.update_memory()
+        return user
 
     def get(self, key, default=None):
         """Retrieve a User object if it can be found, else default
@@ -196,6 +201,7 @@ class User:
     log = app_log
     settings = None
     _auth_refreshed = None
+    multiple_instances = False
 
     def __init__(self, orm_user, settings=None, db=None):
         self.db = db or inspect(orm_user).session
@@ -203,6 +209,11 @@ class User:
         self.orm_user = orm_user
 
         self.allow_named_servers = self.settings.get('allow_named_servers', False)
+        self.multiple_instances = (
+            self.settings.get('app').multiple_instances
+            if self.settings.get('app', None)
+            else False
+        )
 
         self.base_url = self.prefix = (
             url_path_join(self.settings.get('base_url', '/'), 'user', self.escaped_name)
@@ -251,6 +262,103 @@ class User:
             if len(CryptKeeper.instance().keys) > 1:
                 await self.save_auth_state(auth_state)
         return auth_state
+
+    def update_memory(self):
+        db_user = self.db.query(orm.User).filter(orm.User.name == self.name).first()
+        if db_user is None:
+            # User is not yet in the database
+            return
+        self.db.refresh(db_user)
+        db_spawner_list = (
+            self.db.query(orm.Spawner).filter(orm.Spawner.user_id == db_user.id).all()
+        )
+
+        db_name_list = [x.name for x in db_spawner_list]
+        local_name_list = [x.name for x in self.all_spawners()]
+        to_remove_name_list = [x for x in local_name_list if x not in db_name_list]
+        to_add_name_list = [x for x in db_name_list if x not in local_name_list]
+
+        for name in to_remove_name_list:
+            self.log.debug("Remove {} from memory".format(name))
+            self.spawners.pop(name, None)
+
+        for name in to_add_name_list:
+            self.log.debug("Add {} to memory".format(name))
+            self.spawners[name] = self._new_spawner(name)
+            db_spawner = [x for x in db_spawner_list if x.name == name][0]
+            self.spawners[name].load_state(db_spawner.state or {})
+
+        db_active_list = [(x.name, x.server_id) for x in db_spawner_list if x.server_id]
+        local_active_list = [
+            (x.name, x.orm_spawner.server_id)
+            for x in self.spawners.values()
+            if x.active
+        ]
+        to_start_list = [
+            (x, i) for (x, i) in db_active_list if (x, i) not in local_active_list
+        ]
+        to_stop_list = [
+            (x, i) for (x, i) in local_active_list if (x, i) not in db_active_list
+        ]
+        both_active_list = [
+            (x, i) for (x, i) in db_active_list if x in local_active_list
+        ]
+
+        for name, server_id in to_start_list:
+            db_spawner = [x for x in db_spawner_list if x.name == name][0]
+            self.spawners[name].orm_spawner = db_spawner
+            db_server = (
+                self.db.query(orm.Server).filter(orm.Server.id == server_id).first()
+            )
+            self.db.refresh(db_server)
+            self.spawners[name].orm_spawner.server = None
+            self.spawners[name].server = Server(orm_server=db_server)
+
+            async def user_stopped(user, server_name):
+                spawner = user.spawners[server_name]
+                status = await spawner.poll()
+                self.log.warning(
+                    "User %s server stopped with exit code: %s", user.name, status
+                )
+                app = user.settings.get('app', None)
+                if app and hasattr(app, 'proxy'):
+                    # When it dies while spawning, no one else
+                    # would clean up the proxy.extra_spawn_routespecs
+                    await app.proxy.remove_user_spawn(user.name, server_name)
+                    await app.proxy.delete_user(user, server_name)
+                await user.stop(server_name)
+
+            self.spawners[name].add_poll_callback(user_stopped, self, name)
+            self.spawners[name].start_polling()
+
+        for name, server_id in to_stop_list:
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            session_ids = loop.run_until_complete(asyncio.gather(*(self.stop(name),)))[
+                0
+            ]
+
+        for name, server_id in both_active_list:
+            db_server = (
+                self.db.query(orm.Server).filter(orm.Server.id == server_id).first()
+            )
+            if (
+                db_server.base_url != self.spawners[name].server.base_url
+                or db_server.port != self.spawners[name].server.port
+            ):
+                self.log.debug("Bind URL from server {} has changed.".format(name))
+                old_server = (
+                    self.db.query(orm.Server)
+                    .filter(orm.Server.id == self.spawners[name].orm_spawner.server_id)
+                    .first()
+                )
+                if old_server:
+                    self.db.expunge(old_server)
+                self.spawners[name].orm_spawner.server = None
+                self.spawners[name].server = Server(orm_server=db_server)
+
+        for dirty_obj in self.db.dirty:
+            self.db.refresh(dirty_obj)
 
     def all_spawners(self, include_default=True):
         """Generator yielding all my spawners
@@ -538,6 +646,10 @@ class User:
         spawner.server = server = Server(orm_server=orm_server)
         assert spawner.orm_spawner.server is orm_server
 
+        if self.multiple_instances:
+            if handler is not None:
+                await handler.proxy.add_user_spawn(self.name, server_name)
+
         # pass requesting handler to the spawner
         # e.g. for processing GET params
         spawner.handler = handler
@@ -703,6 +815,9 @@ class User:
                     exc_info=True,
                 )
             # raise original exception
+            if self.multiple_instances:
+                if handler is not None:
+                    await handler.proxy.remove_user_spawn(self.name, server_name)
             spawner._start_pending = False
             raise e
         finally:
@@ -717,6 +832,9 @@ class User:
         db.commit()
         spawner._waiting_for_response = True
         await self._wait_up(spawner)
+        if self.multiple_instances:
+            if handler is not None:
+                await handler.proxy.remove_user_spawn(self.name, server_name)
 
     async def _wait_up(self, spawner):
         """Wait for a server to finish starting.
@@ -745,6 +863,14 @@ class User:
                 )
                 e.reason = 'timeout'
                 self.settings['statsd'].incr('spawner.failure.http_timeout')
+            elif isinstance(e, asyncio.CancelledError):
+                e.reason = 'cancel'
+                self.log.info(
+                    "Start of service {server_name} was cancelled".format(
+                        server_name=spawner._log_name
+                    )
+                )
+                self.settings['statsd'].incr('spawner.failure.http_cancel')
             else:
                 e.reason = 'error'
                 self.log.error(

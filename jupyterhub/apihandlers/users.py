@@ -40,6 +40,12 @@ class SelfAPIHandler(APIHandler):
             model = self.service_model(user)
         else:
             model = self.user_model(user)
+            if 'refresh' in self.request.query_arguments.keys():
+                _values = self.request.query_arguments.get('refresh', [b'false'])
+                values = [v.decode("utf-8") for v in _values]
+                if len(values) > 0 and values[0] in ('true', '1'):
+                    await self.refresh_auth(user, force=True)
+            model['auth_state'] = await user.get_auth_state()
         self.write(json.dumps(model))
 
 
@@ -619,7 +625,7 @@ class SpawnProgressAPIHandler(APIHandler):
             'html_message': 'Server ready at <a href="{0}">{0}</a>'.format(url),
             'url': url,
         }
-        failed_event = {'progress': 100, 'failed': True, 'message': "Spawn failed"}
+        failed_event = {'progress': 100, 'failed': True, 'message': "Start failed"}
 
         if spawner.ready:
             # spawner already ready. Trigger progress-completion immediately
@@ -634,7 +640,7 @@ class SpawnProgressAPIHandler(APIHandler):
             # check if spawner has just failed
             f = spawn_future
             if f and f.done() and f.exception():
-                failed_event['message'] = "Spawn failed: %s" % f.exception()
+                failed_event['message'] = "Start failed: %s" % f.exception()
                 await self.send_event(failed_event)
                 return
             else:
@@ -665,14 +671,101 @@ class SpawnProgressAPIHandler(APIHandler):
             await self.send_event(ready_event)
         else:
             # what happened? Maybe spawn failed?
-            f = spawn_future
-            if f and f.done() and f.exception():
-                failed_event['message'] = "Spawn failed: %s" % f.exception()
-            else:
-                self.log.warning(
-                    "Server %s didn't start for unknown reason", spawner._log_name
-                )
+            try:
+                f = spawn_future
+                if f and f.done() and f.exception():
+                    failed_event['message'] = "Start failed: %s" % f.exception()
+                    self.log.info(
+                        "action=failure - Server %s didn't start", spawner._log_name
+                    )
+                else:
+                    self.log.warning(
+                        "Server %s didn't start for unknown reason", spawner._log_name
+                    )
+            except asyncio.CancelledError:
+                if spawner._error:
+                    if spawner._error == 'cancelclick':
+                        failed_event['html_message'] = "Start cancelled by user"
+                    else:
+                        if spawner._detail_error:
+                            html = "<details><summary>Start failed: {}  <span class=\"caret\"></span></summary><p>{}</p></details>".format(
+                                spawner._error, spawner._detail_error
+                            )
+                        else:
+                            html = "Start failed: %s" % spawner._error
+                        failed_event['html_message'] = html
+                    self.log.info(
+                        "action=failure - Server %s didn't start: %s - %s",
+                        spawner._log_name,
+                        spawner._error,
+                        spawner._detail_error,
+                    )
+                else:
+                    failed_event['message'] = "Start failed. Please contact support."
+                    self.log.info(
+                        "action=failure - Server %s didn't start", spawner._log_name
+                    )
             await self.send_event(failed_event)
+
+
+class SpawnCancelAPIHandler(APIHandler):
+    @admin_or_self
+    async def post(self, username, server_name=''):
+        self.set_header('Cache-Control', 'no-cache')
+        self.log.debug(
+            "APICall: SpawnCancel - username={username} server_name={server_name}".format(
+                username=username, server_name=server_name
+            )
+        )
+        if server_name is None:
+            server_name = ''
+        user = self.find_user(username)
+        if user is None:
+            # no such user
+            raise web.HTTPError(404)
+        if server_name not in user.spawners:
+            # user has no such server
+            raise web.HTTPError(404)
+        spawner = user.spawners[server_name]
+        body = self.request.body.decode("utf8")
+        json_body = json.loads(body) if body else {}
+        error = json_body.get('error', '')
+        detail_error = json_body.get('detail_error', '')
+        cancelled = await spawner._cancel(error, detail_error)
+        if not cancelled:
+            await user.stop(server_name)
+        self.set_header('Content-Type', 'text/plain')
+        self.set_status(204)
+
+
+class SpawnProgressUpdateAPIHandler(SpawnProgressAPIHandler):
+    @admin_or_self
+    async def post(self, username, server_name, status):
+        self.set_header('Cache-Control', 'no-cache')
+        self.log.debug(
+            "APICall: SpawnProgressUpdate - username={username} status={status} server_name={server_name}".format(
+                username=username, status=status, server_name=server_name
+            )
+        )
+        if server_name is None:
+            server_name = ''
+        user = self.find_user(username)
+        if user is None:
+            # no such user
+            raise web.HTTPError(404)
+        if server_name not in user.spawners:
+            # user has no such server
+            raise web.HTTPError(404)
+        spawner = user.spawners[server_name]
+        spawner.progress_number = int(status)
+        self.set_header('Content-Type', 'text/plain')
+        self.set_status(204)
+
+
+class SpawnProgressUpdateAPIHandler_no_servername(SpawnProgressUpdateAPIHandler):
+    @admin_or_self
+    async def post(self, username, status):
+        super().post(username, "", status)
 
 
 def _parse_timestamp(timestamp):
@@ -805,10 +898,20 @@ default_handlers = [
     (r"/api/users/([^/]+)", UserAPIHandler),
     (r"/api/users/([^/]+)/server", UserServerAPIHandler),
     (r"/api/users/([^/]+)/server/progress", SpawnProgressAPIHandler),
+    (r"/api/users/([^/]+)/server/cancel", SpawnCancelAPIHandler),
+    (
+        r"/api/users/([^/]+)/server/status/([^/]*)",
+        SpawnProgressUpdateAPIHandler_no_servername,
+    ),
     (r"/api/users/([^/]+)/tokens", UserTokenListAPIHandler),
     (r"/api/users/([^/]+)/tokens/([^/]*)", UserTokenAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)", UserServerAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)/progress", SpawnProgressAPIHandler),
+    (r"/api/users/([^/]+)/servers/([^/]*)/cancel", SpawnCancelAPIHandler),
+    (
+        r"/api/users/([^/]+)/servers/([^/]*)/status/([^/]+)",
+        SpawnProgressUpdateAPIHandler,
+    ),
     (r"/api/users/([^/]+)/activity", ActivityAPIHandler),
     (r"/api/users/([^/]+)/admin-access", UserAdminAccessAPIHandler),
 ]

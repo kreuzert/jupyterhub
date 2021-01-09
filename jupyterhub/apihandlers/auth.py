@@ -89,6 +89,24 @@ class TokenAPIHandler(APIHandler):
         )
 
 
+class SessionIDAPIHandler(APIHandler):
+    @token_authenticated
+    async def get(self, username):
+        # Check if session_id is part of user's auth_state session_ids
+        db_user = orm.User.find(self.db, username)
+        # self.log.info("{} - SessionID Check: {}".format(username, session_id))
+        if db_user:
+            if self.app.strict_session_ids:
+                session_ids = await self.app.load_session_ids(username)
+                session_id = self.request.headers.get("sessionid", "")
+                if (not session_id) or (session_id not in session_ids):
+                    raise web.HTTPError(404)
+            model = self.user_model(self.users[db_user])
+            self.write(json.dumps(model))
+        else:
+            raise web.HTTPError(404)
+
+
 class CookieAPIHandler(APIHandler):
     @token_authenticated
     def get(self, cookie_name, cookie_value=None):
@@ -334,6 +352,7 @@ default_handlers = [
     (r"/api/authorizations/cookie/([^/]+)(?:/([^/]+))?", CookieAPIHandler),
     (r"/api/authorizations/token/([^/]+)", TokenAPIHandler),
     (r"/api/authorizations/token", TokenAPIHandler),
+    (r"/api/authorizations/sessionid/([^/]+)", SessionIDAPIHandler),
     (r"/api/oauth2/authorize", OAuthAuthorizeHandler),
     (r"/api/oauth2/token", OAuthTokenHandler),
 ]

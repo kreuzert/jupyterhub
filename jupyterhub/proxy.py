@@ -19,7 +19,9 @@ Route Specification:
 import asyncio
 import json
 import os
+import re
 import signal
+import socket
 import time
 from functools import wraps
 from subprocess import Popen
@@ -34,6 +36,7 @@ from traitlets import Bool
 from traitlets import default
 from traitlets import Instance
 from traitlets import Integer
+from traitlets import List
 from traitlets import observe
 from traitlets import Unicode
 from traitlets.config import LoggingConfigurable
@@ -42,6 +45,7 @@ from . import utils
 from .metrics import CHECK_ROUTES_DURATION_SECONDS
 from .metrics import PROXY_POLL_DURATION_SECONDS
 from .objects import Server
+from .utils import can_connect
 from .utils import exponential_backoff
 from .utils import make_ssl_context
 from .utils import url_path_join
@@ -109,6 +113,48 @@ class Proxy(LoggingConfigurable):
         If True, the Hub will start the proxy and stop it.
         Set to False if the proxy is managed externally,
         such as by systemd, docker, or another service manager.
+        """,
+    )
+
+    extra_spawn_routes_target = Unicode(
+        "http://_hostname_:8081",
+        config=True,
+        help="""
+        Forward extra_spawn_routes to this adress.
+        _hostname_ will be replaced by socket.gethostname()
+        """,
+    )
+
+    extra_spawn_routes_no_servername = List(
+        [
+            "/hub/api/users/_user_/server/progress",
+            "/hub/api/users/_user_/server",
+            "/hub/spawn-pending/_user_",
+            "/hub/spawn/_user_",
+        ],
+        config=True,
+        help="""
+        List of routes that should be routed explicitely to the
+        target which is spawning the unnamed server,
+        if app.multiple_instances is True.
+        _user_ will be replaced by user name.
+        """,
+    )
+
+    extra_spawn_routes_servername = List(
+        [
+            "/hub/api/users/_user_/servers/_server_/progress",
+            "/hub/api/users/_user_/servers/_server_",
+            "/hub/spawn-pending/_user_/_server_",
+            "/hub/spawn/_user_/_server_",
+        ],
+        config=True,
+        help="""
+        List of routes that should be routed explicitely to the
+        target which is spawning a named server, if
+        app.multiple_instances is True.
+        _server_ will be replaced by server_name.
+        _user_ will be replaced by user name.
         """,
     )
 
@@ -251,9 +297,84 @@ class Proxy(LoggingConfigurable):
         self.log.info("Removing service %s from proxy", service.name)
         await self.delete_route(service.proxy_spec)
 
+    async def remove_user_spawn(self, user_name, server_name='', client=None):
+        """Remove a user's server from the proxy table."""
+        if server_name:
+            spawn_specs = [
+                x.replace('_user_', user_name).replace('_server_', server_name)
+                for x in self.extra_spawn_routes_servername
+            ]
+        else:
+            spawn_specs = [
+                x.replace('_user_', user_name)
+                for x in self.extra_spawn_routes_no_servername
+            ]
+
+        for spec in spawn_specs:
+            self.log.info("Removing user spawn %s from proxy (%s)", user_name, spec)
+            await self.delete_route(spec)
+
+    def get_host_ip(self, target):
+        regex = re.compile(r'^http:\/\/([^\:]+):([\d]+)$')
+        match = regex.match(target)
+        if match:
+            groups = match.groups()
+        else:
+            raise Exception("{} does not fit regex".format(target))
+        if len(groups) != 2:
+            raise Exception("{} does not fit regex".format(target))
+        return groups[0], int(groups[1])
+
+    async def add_user_spawn(self, user_name, server_name='', client=None):
+        """Add a user's server to the proxy table."""
+        if server_name:
+            spawn_specs = [
+                x.replace('_user_', user_name).replace('_server_', server_name)
+                for x in self.extra_spawn_routes_servername
+            ]
+        else:
+            spawn_specs = [
+                x.replace('_user_', user_name)
+                for x in self.extra_spawn_routes_no_servername
+            ]
+
+        target = self.extra_spawn_routes_target.replace(
+            "_hostname_", socket.gethostname()
+        )
+        ip, port = self.get_host_ip(target)
+        if can_connect(ip, port):
+            # if it's not reachable for us, we
+            # assume it's also not reachable for the proxy
+            for spec in spawn_specs:
+                await self.add_route(
+                    spec, target, {'user': user_name, 'server_name': server_name}
+                )
+
+    async def takeover_extra_spawn_routes(self, target, routespecs_dict):
+        if (
+            self.extra_spawn_routes_target.replace("_hostname_", socket.gethostname())
+            == target
+        ):
+            # Don't replace your own routes
+            return
+        ip, port = self.get_host_ip(target)
+        if not can_connect(ip, port):
+            for user_name, server_names in routespecs_dict.items():
+                for server_name in server_names:
+                    # host which is spawning is not reachable.
+                    # Take over the spawning process
+                    await self.remove_user_spawn(user_name, server_name)
+                    await self.add_user_spawn(user_name, server_name)
+                await self.app.init_spawners([user_name], server_names)
+
     async def add_user(self, user, server_name='', client=None):
         """Add a user's server to the proxy table."""
         spawner = user.spawners[server_name]
+        if self.app.multiple_instances:
+            # If we're using multiple_instances it's possible that a host
+            # tries to jump in for a stopped host, when there's no server
+            if not spawner.server:
+                return
         self.log.info(
             "Adding user %s to proxy %s => %s",
             user.name,
@@ -347,6 +468,10 @@ class Proxy(LoggingConfigurable):
                     else:
                         route = routes[spec]
                         if route['target'] != spawner.server.host:
+                            if self.app.multiple_instances:
+                                # do not steal other routes.
+                                # Multiple instances only works with BackendSpawners.
+                                continue
                             self.log.warning(
                                 "Updating route for %s (%s → %s)",
                                 spec,
@@ -384,11 +509,55 @@ class Proxy(LoggingConfigurable):
                     )
                     futures.append(self.add_service(service))
 
+        takeover_dict = {}
+
         # Now delete the routes that shouldn't be there
         for routespec in routes:
             if routespec not in good_routes:
+                if self.app.multiple_instances:
+                    if routes.get(routespec, {}).get('data', {}).get('hub', False):
+                        # Don't delete other Hub routes
+                        continue
+                    user_name = routes[routespec].get('data', {}).get('user', '_user_')
+                    server_name = (
+                        routes[routespec].get('data', {}).get('server_name', '_server_')
+                    )
+                    routespec_replaced = routespec.replace(user_name, '_user_')
+                    skip_delete = False
+                    if server_name:
+                        routespec_replaced = routespec_replaced.replace(
+                            server_name, '_server_'
+                        )
+                        routespec_replaced_2 = routespec_replaced[:-1]
+                        if (
+                            routespec_replaced in self.extra_spawn_routes_servername
+                            or routespec_replaced_2
+                            in self.extra_spawn_routes_servername
+                        ):
+                            skip_delete = True
+                    else:
+                        routespec_replaced_2 = routespec_replaced[:-1]
+                        if (
+                            routespec_replaced in self.extra_spawn_routes_no_servername
+                            or routespec_replaced_2
+                            in self.extra_spawn_routes_no_servername
+                        ):
+                            skip_delete = True
+                    if skip_delete:
+                        target = routes.get(routespec, {}).get('target', '')
+                        if target not in takeover_dict:
+                            takeover_dict[target] = {}
+                        if user_name not in takeover_dict[target]:
+                            takeover_dict[target][user_name] = []
+                        if server_name not in takeover_dict[target][user_name]:
+                            takeover_dict[target][user_name].append(server_name)
+                        continue
                 self.log.warning("Deleting stale route %s", routespec)
                 futures.append(self.delete_route(routespec))
+
+        # check if other spawning hosts are reachable
+        for target, routespec_infos in takeover_dict.items():
+            await self.takeover_extra_spawn_routes(target, routespec_infos)
 
         await asyncio.gather(*futures)
         stop = time.perf_counter()  # timer stops here when user is deleted
