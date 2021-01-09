@@ -23,8 +23,9 @@ RUN apk update && \
                        curl-dev \
                        openssl-dev \
                        postgresql-dev \
-                       python3-dev && \
-                       cd /srv/jupyterhub && pip3 install --upgrade setuptools pip && pip3 install cryptography --no-binary=cryptography && pip3 install -e . && \
+                       python3-dev \
+                       swig && \
+                       cd /srv/jupyterhub && pip3 install --upgrade setuptools pip && pip3 install wheel && pip3 install cryptography --no-binary=cryptography && pip3 install -e . && \
     apk del .build-dependencies 
 
 ENV LANG=en_US.UTF-8
