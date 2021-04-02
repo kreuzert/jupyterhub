@@ -1657,15 +1657,6 @@ class BackendSpawner(Spawner):
         - cancel_progress_activation
     """
 
-    health_progress_refresh_rate = Integer(
-        1000,
-        config=True,
-        help="""
-        Refresh rate to check if the instance is still reachable.
-        Value in ms.
-        """,
-    )
-
     cancel_progress_refresh_rate = Integer(
         1000,
         config=True,
@@ -1739,15 +1730,6 @@ class BackendSpawner(Spawner):
                 return True
         return False
 
-    def health_url(self, server_name=''):
-        """API path for cancel endpoint for a server with a given name"""
-        url_parts = ['users', self.user.escaped_name]
-        if server_name:
-            url_parts.extend(['servers', server_name, 'health'])
-        else:
-            url_parts.extend(['server/health'])
-        return url_path_join(*url_parts)
-
     def cancel_url(self, server_name=''):
         """API path for cancel endpoint for a server with a given name"""
         url_parts = ['users', self.user.escaped_name]
@@ -1765,10 +1747,6 @@ class BackendSpawner(Spawner):
         else:
             url_parts.extend(['server/status'])
         return url_path_join(*url_parts)
-
-    @property
-    def _health_url(self):
-        return self.health_url(self.name)
 
     @property
     def _cancel_url(self):

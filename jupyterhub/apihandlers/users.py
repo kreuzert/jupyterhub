@@ -707,18 +707,6 @@ class SpawnProgressAPIHandler(APIHandler):
                     )
             await self.send_event(failed_event)
 
-
-class SpawnHealthAPIHandler(APIHandler):
-    @admin_or_self
-    async def get(self, username, server_name=''):
-        self.set_status(200)
-        if self.app.multiple_instances:
-            # self.set_header('Content-Type', 'application/json')
-            self.set_status(204)
-            self.set_header('Location', self.app.proxy.extra_spawn_routes_target)
-        return
-
-
 class SpawnCancelAPIHandler(APIHandler):
     @admin_or_self
     async def post(self, username, server_name=''):
@@ -922,7 +910,6 @@ default_handlers = [
     (r"/api/users/([^/]+)/server", UserServerAPIHandler),
     (r"/api/users/([^/]+)/server/progress", SpawnProgressAPIHandler),
     (r"/api/users/([^/]+)/server/cancel", SpawnCancelAPIHandler),
-    (r"/api/users/([^/]+)/server/health", SpawnHealthAPIHandler),
     (
         r"/api/users/([^/]+)/server/status",
         SpawnProgressUpdateAPIHandler_no_servername,
@@ -932,7 +919,6 @@ default_handlers = [
     (r"/api/users/([^/]+)/servers/([^/]*)", UserServerAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)/progress", SpawnProgressAPIHandler),
     (r"/api/users/([^/]+)/servers/([^/]*)/cancel", SpawnCancelAPIHandler),
-    (r"/api/users/([^/]+)/servers/([^/]*)/health", SpawnHealthAPIHandler),
     (
         r"/api/users/([^/]+)/servers/([^/]*)/status",
         SpawnProgressUpdateAPIHandler,

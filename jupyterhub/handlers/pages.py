@@ -429,7 +429,6 @@ class SpawnPendingHandler(BaseHandler):
                 spawner=spawner,
                 progress_url=spawner._progress_url,
                 cancel_url=spawner._cancel_url,
-                health_url=spawner._health_url,
                 cancel_progress_activation=spawner.cancel_progress_activation,
                 cancel_progress_refresh_rate=spawner.cancel_progress_refresh_rate,
                 health_progress_refresh_rate=spawner.health_progress_refresh_rate,
