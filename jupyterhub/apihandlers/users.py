@@ -735,7 +735,6 @@ class SpawnCancelAPIHandler(APIHandler):
         cancelled = await spawner._cancel(error, detail_error)
         if not cancelled:
             await user.stop(server_name)
-        await self.app.proxy.remove_user_spawn(user.name, server_name)
         await self.app.proxy.delete_route(spawner_proxy_spec)
         api_token = orm.APIToken.find_by_id(self.db, api_token_id)
         if api_token:
