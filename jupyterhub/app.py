@@ -13,6 +13,7 @@ import signal
 import socket
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timedelta
@@ -102,7 +103,7 @@ from .metrics import TOTAL_USERS
 
 # classes for config
 from .auth import Authenticator, PAMAuthenticator
-from .crypto import CryptKeeper
+from .crypto import CryptKeeper, decrypt
 from .spawner import Spawner, LocalProcessSpawner
 from .objects import Hub, Server
 
@@ -371,7 +372,7 @@ class JupyterHub(Application):
         """,
     ).tag(config=True)
     last_activity_interval = Integer(
-        300, help="Interval (in seconds) at which to update last-activity timestamps."
+        60, help="Interval (in seconds) at which to update last-activity timestamps."
     ).tag(config=True)
     proxy_check_interval = Integer(
         30, help="Interval (in seconds) at which to check if the proxy is running."
@@ -1005,6 +1006,49 @@ class JupyterHub(Application):
             return self.default_server_name
         else:
             return ""
+
+    logout_on_all_devices_argname = Unicode(
+        "onalldevices",
+        config=True,
+        help="""Default argument name for logout on all devices.
+        User can logout on all devices with a GET request to
+        /hub/logout?<logout_on_all_devices_argname>=true
+        Use c.JupyterHub.logout_on_all_devices to define a default
+        value for logout on all devices.
+        """,
+    )
+
+    logout_on_all_devices = Bool(
+        False,
+        config=True,
+        help="""Default value for logout on all devices.
+        This will create a new api_token for a user when he logs out.
+        Therefore all previous generated cookies, based on cookie_id,
+        are invalid.
+        """,
+    )
+
+    strict_session_ids = Bool(
+        False,
+        config=True,
+        help="""Saves session_ids in user's auth_state.
+        If the user logs out all stored session_ids will be removed.
+        Start services with JUPYTERHUB_REQUIRE_SESSION_ID="true", to
+        prevent logged out browsers to access these services.
+        """,
+    )
+
+    async def load_session_ids(self, username):
+        db_user = orm.User.find(self.db, username)
+        if db_user:
+            self.db.refresh(db_user)
+            encrypted = db_user.encrypted_auth_state
+            if encrypted is None:
+                return []
+            auth_state = await decrypt(encrypted)
+            if 'session_ids' in auth_state:
+                return auth_state['session_ids']
+        return []
 
     # class for spawning single-user servers
     spawner_class = EntryPointType(
@@ -2536,7 +2580,7 @@ class JupyterHub(Application):
     async def update_last_activity(self):
         """Update User.last_activity timestamps from the proxy"""
         routes = await self.proxy.get_all_routes()
-        users_count = 0
+        active_users = []
         active_users_count = 0
         now = datetime.utcnow()
         for prefix, route in routes.items():
@@ -2546,7 +2590,8 @@ class JupyterHub(Application):
                 continue
             if 'server_name' not in route_data:
                 continue
-            users_count += 1
+            if route_data['user'] not in active_users:
+                active_users.append(route_data['user'])
             if 'last_activity' not in route_data:
                 # no last activity data (possibly proxy other than CHP)
                 continue
@@ -2573,9 +2618,36 @@ class JupyterHub(Application):
                 spawner.last_activity = dt
             if (now - user.last_activity).total_seconds() < self.active_user_window:
                 active_users_count += 1
-        self.statsd.gauge('users.running', users_count)
+        self.statsd.gauge('users.running', len(active_users))
         self.statsd.gauge('users.active', active_users_count)
-
+        statsd_gauge_systems = os.environ.get("STATSD_GAUGE_SYSTEMS", "")
+        if statsd_gauge_systems:
+            systems = statsd_gauge_systems.split()
+            total = 0
+            for system in systems:
+                if system == "hdfcloud":
+                    system_images = orm.Server.list_of_accounts(self.db, system)
+                    total_system = len(system_images)
+                    counter = Counter(system_images)
+                    for k,v in counter.items():
+                        k = k.replace(".", "").replace(" ", "")
+                        self.statsd.gauge(f"servers.system.partitions.{system}.{k}", v)
+                else:
+                    system_partitions = orm.Server.list_of_partitions(self.db, system)
+                    total_system = len(system_partitions)
+                    counter = Counter(system_partitions)
+                    for k,v in counter.items():
+                        k = k.replace(".", "").replace(" ", "")
+                        self.statsd.gauge(f"servers.system.partitions.{system}.{k}", v)
+                    system_projects = orm.Server.list_of_projects(self.db, system)
+                    total_system = len(system_projects)
+                    counter = Counter(system_projects)
+                    for k,v in counter.items():
+                        k = k.replace(".", "").replace(" ", "")
+                        self.statsd.gauge(f"servers.system.projects.{system}.{k}", v)
+                total += total_system
+                self.statsd.gauge(f"servers.system.total.{system}", total_system)
+            self.statsd.gauge(f"servers.all", total)
         try:
             self.db.commit()
         except SQLAlchemyError:

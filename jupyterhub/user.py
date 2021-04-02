@@ -521,6 +521,8 @@ class User:
         JupyterHub expects more than one single-server per user
         url of the server will be /user/:name/:server_name
         """
+
+        spawn_timer = self.settings['statsd'].timer('spawn.start.timer').start()
         db = self.db
 
         if handler:
@@ -557,6 +559,8 @@ class User:
 
         # create API and OAuth tokens
         spawner.api_token = api_token
+        orm_token = orm.APIToken.find(self.db, api_token)
+        spawner.orm_spawner.api_token_id = orm_token.id
         spawner.admin_access = self.settings.get('admin_access', False)
         client_id = spawner.oauth_client_id
         oauth_provider = self.settings.get('oauth_provider')
@@ -684,14 +688,24 @@ class User:
                     )
                 )
                 e.reason = 'timeout'
-                self.settings['statsd'].incr('spawner.failure.timeout')
+                get_function = getattr(spawner.user_options, "get", None)
+                if callable(get_function):
+                    system = spawner.user_options.get("system_input", "unknown")
+                else:
+                    system = "unknown"
+                self.settings['statsd'].incr(f'spawner.{system}.failure.timeout')
             else:
                 self.log.error(
                     "Unhandled error starting {user}'s server: {error}".format(
                         user=self.name, error=e
                     )
                 )
-                self.settings['statsd'].incr('spawner.failure.error')
+                get_function = getattr(spawner.user_options, "get", None)
+                if callable(get_function):
+                    system = spawner.user_options.get("system_input", "unknown")
+                else:
+                    system = "unknown"
+                self.settings['statsd'].incr(f'spawner.{system}.failure.error')
                 e.reason = 'error'
             try:
                 await self.stop(spawner.name)
@@ -716,9 +730,9 @@ class User:
         spawner.orm_spawner.state = spawner.get_state()
         db.commit()
         spawner._waiting_for_response = True
-        await self._wait_up(spawner)
+        await self._wait_up(spawner, spawn_timer)
 
-    async def _wait_up(self, spawner):
+    async def _wait_up(self, spawner, spawn_timer=None):
         """Wait for a server to finish starting.
 
         Shuts the server down if it doesn't respond within
@@ -744,7 +758,25 @@ class User:
                     )
                 )
                 e.reason = 'timeout'
-                self.settings['statsd'].incr('spawner.failure.http_timeout')
+                get_function = getattr(spawner.user_options, "get", None)
+                if callable(get_function):
+                    system = spawner.user_options.get("system_input", "unknown")
+                else:
+                    system = "unknown"
+                self.settings['statsd'].incr(f'spawner.{system}.failure.http_timeout')
+            elif isinstance(e, asyncio.CancelledError):
+                e.reason = 'cancel'
+                self.log.info(
+                    "Start of service {server_name} was cancelled".format(
+                        server_name=spawner._log_name
+                    )
+                )
+                get_function = getattr(spawner.user_options, "get", None)
+                if callable(get_function):
+                    system = spawner.user_options.get("system_input", "unknown")
+                else:
+                    system = "unknown"
+                self.settings['statsd'].incr(f'spawner.{system}.failure.http_cancel')
             else:
                 e.reason = 'error'
                 self.log.error(
@@ -752,7 +784,12 @@ class User:
                         user=self.name, url=server.url, error=e
                     )
                 )
-                self.settings['statsd'].incr('spawner.failure.http_error')
+                get_function = getattr(spawner.user_options, "get", None)
+                if callable(get_function):
+                    system = spawner.user_options.get("system_input", "unknown")
+                else:
+                    system = "unknown"
+                self.settings['statsd'].incr(f'spawner.{system}.failure.http_error')
             try:
                 await self.stop(spawner.name)
             except Exception:
@@ -770,6 +807,11 @@ class User:
             # record the Spawner version for better error messages
             # if it doesn't work
             spawner._jupyterhub_version = server_version
+            if spawn_timer:
+                spawn_timer.stop(send=False)
+                system = spawner.user_options.get("system_input", "unknown")
+                backend_spawner_id = spawner.backend_spawner_id
+                self.settings['statsd'].timing(f'spawner.{system}.{backend_spawner_id}', spawn_timer.ms)
         finally:
             spawner._waiting_for_response = False
             spawner._start_pending = False

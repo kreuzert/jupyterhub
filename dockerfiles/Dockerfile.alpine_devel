@@ -1,0 +1,34 @@
+FROM python:3.8.7-alpine3.12
+  
+ARG JUPYTERHUB_VERSION=1.3.0
+
+RUN adduser --uid 1099 --disabled-password --gecos '' jupyterhub
+
+RUN mkdir -p /srv/jupyterhub
+
+# Required for pycurl
+ENV PYCURL_SSL_LIBRARY=openssl
+RUN apk update && apk add npm libpq libcurl
+
+COPY . /srv/jupyterhub
+
+RUN apk update && \
+    apk add --no-cache --virtual .build-dependencies \
+                       build-base \
+                       py-pip \
+                       git \
+                       gcc \
+                       musl-dev \
+                       libffi-dev \
+                       curl-dev \
+                       openssl-dev \
+                       postgresql-dev \
+                       python3-dev \
+                       swig && \
+                       pip3 install --upgrade setuptools pip && pip3 install wheel && pip3 install cryptography --no-binary=cryptography 
+
+
+ENV LANG=en_US.UTF-8
+
+# USER jupyterhub
+ENTRYPOINT ["/srv/jupyterhub/entrypoint_devel.sh"]

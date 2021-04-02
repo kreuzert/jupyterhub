@@ -112,6 +112,32 @@ class Server(Base):
     def __repr__(self):
         return "<Server(%s:%s)>" % (self.ip, self.port)
 
+    @classmethod
+    def list_of_accounts(cls, db, system):
+        """Find servers by system.
+        Returns None if not found.
+        """
+        all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
+        ret = [x[1].user_options.get("account_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        return ret
+
+    @classmethod
+    def list_of_projects(cls, db, system):
+        """Find servers by system.
+        Returns None if not found.
+        """
+        all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
+        ret = [x[1].user_options.get("project_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        return ret
+
+    @classmethod
+    def list_of_partitions(cls, db, system):
+        """Find servers by system.
+        Returns None if not found.
+        """
+        all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
+        ret = [x[1].user_options.get("partition_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        return ret
 
 # user:group many:many mapping table
 user_group_map = Table(
@@ -244,6 +270,7 @@ class Spawner(Base):
     started = Column(DateTime)
     last_activity = Column(DateTime, nullable=True)
     user_options = Column(JSONDict)
+    api_token_id = Column(Integer, ForeignKey('api_tokens.id', ondelete='SET NULL'))
 
     # properties on the spawner wrapper
     # some APIs get these low-level objects
@@ -477,6 +504,13 @@ class APIToken(Hashed, Base):
         return "<{cls}('{pre}...', {kind}='{name}')>".format(
             cls=self.__class__.__name__, pre=self.prefix, kind=kind, name=name
         )
+
+    @classmethod
+    def find_by_id(cls, db, id):
+        api_token = db.query(cls).filter(cls.id == id).first()
+        if type(api_token) == list:
+            api_token = api_token[0]
+        return api_token
 
     @classmethod
     def find(cls, db, token, *, kind=None):

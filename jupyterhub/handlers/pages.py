@@ -2,6 +2,7 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import asyncio
+import os
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -14,6 +15,9 @@ from tornado.httputil import urlparse
 
 from .. import __version__
 from .. import orm
+from ..jupyterjsc.utils.hdfcloud import get_hdfcloud
+from ..jupyterjsc.utils.maintenance import get_maintenance_list
+from ..jupyterjsc.utils.unicore import get_unicore_config
 from ..metrics import SERVER_POLL_DURATION_SECONDS
 from ..metrics import ServerPollStatus
 from ..pagination import Pagination
@@ -70,13 +74,18 @@ class HomeHandler(BaseHandler):
         else:
             url = url_path_join(self.hub.base_url, 'spawn', user.escaped_name)
 
-        auth_state = await user.get_auth_state()
+        hdf_cloud = get_hdfcloud()
+        maintenance_list = get_maintenance_list()
+        unicore_config = get_unicore_config()
+
         html = await self.render_template(
             'home.html',
-            auth_state=auth_state,
             user=user,
             url=url,
             allow_named_servers=self.allow_named_servers,
+            hdfcloud=hdf_cloud,
+            maintenance_list=maintenance_list,
+            unicore_config=unicore_config,
             named_server_limit_per_user=self.named_server_limit_per_user,
             url_path_join=url_path_join,
             # can't use user.spawners because the stop method of User pops named servers from user.spawners when they're stopped
@@ -98,9 +107,17 @@ class SpawnHandler(BaseHandler):
 
     async def _render_form(self, for_user, spawner_options_form, message=''):
         auth_state = await for_user.get_auth_state()
+
+        hdf_cloud = get_hdfcloud()
+        maintenance_list = get_maintenance_list()
+        unicore_config = get_unicore_config()
+
         return await self.render_template(
             'spawn.html',
             for_user=for_user,
+            hdfcloud=hdf_cloud,
+            maintenance_list=maintenance_list,
+            unicore_config=unicore_config,
             auth_state=auth_state,
             spawner_options_form=spawner_options_form,
             error_message=message,
@@ -411,6 +428,11 @@ class SpawnPendingHandler(BaseHandler):
                 user=user,
                 spawner=spawner,
                 progress_url=spawner._progress_url,
+                cancel_url=spawner._cancel_url,
+                health_url=spawner._health_url,
+                cancel_progress_activation=spawner.cancel_progress_activation,
+                cancel_progress_refresh_rate=spawner.cancel_progress_refresh_rate,
+                health_progress_refresh_rate=spawner.health_progress_refresh_rate,
                 auth_state=auth_state,
             )
             self.finish(html)
@@ -651,6 +673,17 @@ class ProxyErrorHandler(BaseHandler):
         self.write(html)
 
 
+class Error901Handler(BaseHandler):
+    @web.authenticated
+    async def get(self, server_name=''):
+        user = self.current_user
+        cancel_url = user.spawners[server_name]._cancel_url
+        html = await self.render_template(
+            '901.html', server_name=server_name, cancel_url=cancel_url
+        )
+        self.finish(html)
+
+
 class HealthCheckHandler(BaseHandler):
     """Serve health check probes as quickly as possible"""
 
@@ -673,5 +706,7 @@ default_handlers = [
     (r'/spawn/([^/]+)/([^/]+)', SpawnHandler),
     (r'/token', TokenPageHandler),
     (r'/error/(\d+)', ProxyErrorHandler),
+    (r'/901/([^/]+)', Error901Handler),
+    (r'/901', Error901Handler),
     (r'/health$', HealthCheckHandler),
 ]
