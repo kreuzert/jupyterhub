@@ -1,5 +1,6 @@
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+import asyncio
 import json
 import warnings
 from collections import defaultdict
@@ -522,7 +523,6 @@ class User:
         url of the server will be /user/:name/:server_name
         """
 
-        spawn_timer = self.settings['statsd'].timer('spawn.start.timer').start()
         db = self.db
 
         if handler:
@@ -559,8 +559,6 @@ class User:
 
         # create API and OAuth tokens
         spawner.api_token = api_token
-        orm_token = orm.APIToken.find(self.db, api_token)
-        spawner.orm_spawner.api_token_id = orm_token.id
         spawner.admin_access = self.settings.get('admin_access', False)
         client_id = spawner.oauth_client_id
         oauth_provider = self.settings.get('oauth_provider')
@@ -730,9 +728,9 @@ class User:
         spawner.orm_spawner.state = spawner.get_state()
         db.commit()
         spawner._waiting_for_response = True
-        await self._wait_up(spawner, spawn_timer)
+        await self._wait_up(spawner)
 
-    async def _wait_up(self, spawner, spawn_timer=None):
+    async def _wait_up(self, spawner):
         """Wait for a server to finish starting.
 
         Shuts the server down if it doesn't respond within
@@ -807,11 +805,6 @@ class User:
             # record the Spawner version for better error messages
             # if it doesn't work
             spawner._jupyterhub_version = server_version
-            if spawn_timer:
-                spawn_timer.stop(send=False)
-                system = spawner.user_options.get("system_input", "unknown")
-                backend_spawner_id = spawner.backend_spawner_id
-                self.settings['statsd'].timing(f'spawner.{system}.{backend_spawner_id}', spawn_timer.ms)
         finally:
             spawner._waiting_for_response = False
             spawner._start_pending = False

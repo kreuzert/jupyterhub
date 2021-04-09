@@ -1060,7 +1060,7 @@ class Spawner(LoggingConfigurable):
             )
             return
 
-        yield {"progress": 0, "message": "Server requested"}
+        yield {"progress": 0, "message": ""}
 
         async with aclosing(self.progress()) as progress:
             async for event in progress:
@@ -1649,8 +1649,7 @@ class BackendSpawner(Spawner):
       - DELETE has to stop the service.
     Features:
       - The backend is able to update the progressbar with the ${JUPYTERHUB_STATUS_URL}
-        path. Related configurations:
-        - first_progress
+        path.
       - The backend is able to cancel a spawn with the ${JUPYTERHUB_CANCEL_URL} path.
       - User can stop the start by himself. Related configurations:
         - cancel_progress_refresh_rate
@@ -1673,14 +1672,6 @@ class BackendSpawner(Spawner):
         help="""
         Defines at which percentage user's should be allowed to cancel a spawn.
         Default is 50.
-        """,
-    )
-
-    first_progress = Dict(
-        [],
-        config=True,
-        help="""
-        First progress to show immediately after start
         """,
     )
 
@@ -1829,7 +1820,10 @@ class BackendSpawner(Spawner):
                 except KeyError:
                     self.log.exception("Unknown status update. Keep spawning server.")
                     await yield_({"progress": 50, "message": "Spawning server..."})
-            await gen.sleep(1)
+            if self.progress_number < 50 or self.progress_number >= 90:
+                await gen.sleep(0.5)
+            else:
+                await gen.sleep(0.01)
 
     async def poll(self):
         """Poll the spawned process to see if it is still running.
@@ -1932,11 +1926,6 @@ class BackendSpawner(Spawner):
                 self.backend_url, headers=header, json=popen_kwargs, verify=False
             )
         ) as r:
-            self.log.info(
-                "---- {}\n{}\n{}".format(
-                    r.status_code, r.content.decode("utf-8"), r.headers
-                )
-            )
             if r.status_code == 202:
                 self.backend_spawner_id = int(r.content.decode('utf-8'))
             elif r.status_code == 204:
@@ -1956,11 +1945,6 @@ class BackendSpawner(Spawner):
                     bsip=self.backend_spawner_ip,
                 )
             )
-        if self.first_progress:
-            self.progress_dic[
-                int(self.first_progress.get("progress", 10))
-            ] = self.first_progress
-            self.progress_number = int(self.first_progress.get("progress", 10))
         return (self.backend_spawner_ip, self.port)
 
     async def stop(self):
@@ -1981,7 +1965,7 @@ class BackendSpawner(Spawner):
         headers = {"uuidcode": uuidcode}
 
         self.log.info(
-                "uuidcode={uuidcode} action=stop server={logname} url={url}".format(
+            "uuidcode={uuidcode} action=stop server={logname} url={url}".format(
                 uuidcode=uuidcode, logname=self._log_name, url=url
             )
         )

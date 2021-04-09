@@ -118,7 +118,13 @@ class Server(Base):
         Returns None if not found.
         """
         all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
-        ret = [x[1].user_options.get("account_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        ret = [
+            x[1].user_options.get("account_input", "unknown")
+            for x in all_servers
+            if hasattr(x[1], 'user_options')
+            and x[1].user_options is not None
+            and x[1].user_options.get("system_input", "") == system
+        ]
         return ret
 
     @classmethod
@@ -127,7 +133,13 @@ class Server(Base):
         Returns None if not found.
         """
         all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
-        ret = [x[1].user_options.get("project_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        ret = [
+            x[1].user_options.get("project_input", "unknown")
+            for x in all_servers
+            if hasattr(x[1], 'user_options')
+            and x[1].user_options is not None
+            and x[1].user_options.get("system_input", "") == system
+        ]
         return ret
 
     @classmethod
@@ -136,8 +148,15 @@ class Server(Base):
         Returns None if not found.
         """
         all_servers = db.query(cls, Spawner).filter(cls.id == Spawner.server_id).all()
-        ret = [x[1].user_options.get("partition_input", "unknown") for x in all_servers if hasattr(x[1], 'user_options') and x[1].user_options is not None and x[1].user_options.get("system_input", "") == system]
+        ret = [
+            x[1].user_options.get("partition_input", "unknown")
+            for x in all_servers
+            if hasattr(x[1], 'user_options')
+            and x[1].user_options is not None
+            and x[1].user_options.get("system_input", "") == system
+        ]
         return ret
+
 
 # user:group many:many mapping table
 user_group_map = Table(
@@ -270,7 +289,6 @@ class Spawner(Base):
     started = Column(DateTime)
     last_activity = Column(DateTime, nullable=True)
     user_options = Column(JSONDict)
-    api_token_id = Column(Integer, ForeignKey('api_tokens.id', ondelete='SET NULL'))
 
     # properties on the spawner wrapper
     # some APIs get these low-level objects

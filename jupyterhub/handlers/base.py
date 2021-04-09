@@ -942,7 +942,16 @@ class BaseHandler(RequestHandler):
             self.log.info(
                 "User %s took %.3f seconds to start", user_server_name, toc - tic
             )
+            system = spawner.user_options.get("system_input", "unknown")
+            backend_spawner_id = spawner.backend_spawner_id
             self.statsd.timing('spawner.success', (toc - tic) * 1000)
+            self.log.debug(
+                f"Custom metric: spawner.custom.{system}.{backend_spawner_id} %s",
+                (toc - tic) * 1000,
+            )
+            self.statsd.timing(
+                f'spawner.custom.{system}.{backend_spawner_id}', (toc - tic) * 1000
+            )
             SERVER_SPAWN_DURATION_SECONDS.labels(
                 status=ServerSpawnStatus.success
             ).observe(time.perf_counter() - spawn_start_time)

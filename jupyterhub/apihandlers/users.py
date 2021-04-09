@@ -46,6 +46,7 @@ class SelfAPIHandler(APIHandler):
                 if len(values) > 0 and values[0] in ('true', '1'):
                     await self.refresh_auth(user, force=True)
             model['auth_state'] = await user.get_auth_state()
+            del model['auth_state']['refresh_token']
         self.write(json.dumps(model))
 
 
@@ -707,6 +708,7 @@ class SpawnProgressAPIHandler(APIHandler):
                     )
             await self.send_event(failed_event)
 
+
 class SpawnCancelAPIHandler(APIHandler):
     @admin_or_self
     async def post(self, username, server_name=''):
@@ -726,8 +728,6 @@ class SpawnCancelAPIHandler(APIHandler):
             # user has no such server
             raise web.HTTPError(404)
         spawner = user.spawners[server_name]
-        spawner_proxy_spec = spawner.proxy_spec
-        api_token_id = spawner.orm_spawner.api_token_id
         body = self.request.body.decode("utf8")
         json_body = json.loads(body) if body else {}
         error = json_body.get('error', '')
@@ -735,12 +735,6 @@ class SpawnCancelAPIHandler(APIHandler):
         cancelled = await spawner._cancel(error, detail_error)
         if not cancelled:
             await user.stop(server_name)
-        await self.app.proxy.delete_route(spawner_proxy_spec)
-        api_token = orm.APIToken.find_by_id(self.db, api_token_id)
-        if api_token:
-            self.log.info(api_token)
-            self.db.delete(api_token)
-            self.db.commit()
         self.set_header('Content-Type', 'text/plain')
         self.set_status(204)
 
