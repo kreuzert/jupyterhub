@@ -10,7 +10,7 @@ RUN mkdir -p /srv/jupyterhub
 # Required for pycurl
 ENV PYCURL_SSL_LIBRARY=openssl
 ENV LD_PRELOAD=/lib/libssl.so.1.1
-RUN apk update && apk add npm libpq libcurl openssh-client py-cryptography
+RUN apk update && apk add npm libpq libcurl openssh openssh-client py-cryptography
 
 COPY . /srv/jupyterhub
 
